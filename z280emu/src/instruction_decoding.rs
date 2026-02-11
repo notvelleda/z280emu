@@ -384,13 +384,12 @@ decode_instructions! {
         hl_indirection: {
             hl_indirect() | hl_indirect_overrides(),
         },
-        extended_indirect_modes: {
+        extended_indirect_no_da: {
             IXOverride => {
                 0b000 => indirect(Register::SP + imm16()),
                 0b001 => indirect(Register::HL + Register::IX),
                 0b010 => indirect(Register::HL + Register::IY),
                 0b011 => indirect(Register::IX + Register::IY),
-                0b111 => indirect(imm16()),
             },
             IYOverride => {
                 0b000 => indirect(Register::PC + imm16()),
@@ -398,6 +397,12 @@ decode_instructions! {
                 0b010 => indirect(Register::IY + imm16()),
                 0b011 => indirect(Register::HL + imm16()),
             },
+        },
+        extended_indirect_da: {
+            0b111 => indirect(imm16()),
+        },
+        extended_indirect_modes: {
+            extended_indirect_no_da() | extended_indirect_da()
         },
         // R, RX, IR, DA, X, SX, RA, SR, BX
         src_dst: {
@@ -613,7 +618,7 @@ decode_instructions! {
 
             // R is a duplicate of LD register (byte)
             // RX, IR, X, SX, RA, SR, BX
-            "01_111_***", src: ix_iy_components(0..3) | hl_indirect_overrides(0..3) | extended_indirect_modes(0..3), dst: Register::A,
+            "01_111_***", src: ix_iy_components(0..3) | hl_indirect_overrides(0..3) | extended_indirect_no_da(0..3), dst: Register::A,
             // IM is a duplicate of LD immediate (byte)
             // IR
             "00_001_010", src: indirect(Register::BC), dst: Register::A,
@@ -625,7 +630,7 @@ decode_instructions! {
 
             // R is a duplicate of LD register (byte)
             // R, RX, IR, X, SX, RA, SR, BX
-            "01_***_111", src: Register::A, dst: ix_iy_components(3..6) | hl_indirect_overrides(3..6) | extended_indirect_modes(3..6),
+            "01_***_111", src: Register::A, dst: ix_iy_components(3..6) | hl_indirect_overrides(3..6) | extended_indirect_no_da(3..6),
             // IR
             "00_000_010", src: Register::A, dst: indirect(Register::BC),
             "00_010_010", src: Register::A, dst: indirect(Register::DE),

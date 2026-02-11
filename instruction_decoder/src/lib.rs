@@ -40,11 +40,7 @@ struct InstructionEncoding {
 
 impl InstructionEncoding {
     fn is_dynamic(&self) -> bool {
-        self.parameters
-            .iter()
-            .map(|(_, method)| matches!(method, AddressingMethod::Decode { .. }))
-            .reduce(|a, b| a || b)
-            .unwrap_or_default()
+        self.parameters.iter().map(|(_, method)| method.is_dynamic()).reduce(|a, b| a || b).unwrap_or_default()
     }
 
     fn resolve_parameter(
@@ -190,6 +186,15 @@ enum AddressingMethod {
 }
 
 impl AddressingMethod {
+    fn is_dynamic(&self) -> bool {
+        match self {
+            Self::Decode { .. } => true,
+            Self::Indirect { lhs, rhs } => [lhs].into_iter().chain(rhs.iter()).any(|method| method.is_dynamic()),
+            Self::List(list) => list.iter().any(AddressingMethod::is_dynamic),
+            _ => false,
+        }
+    }
+
     fn immediate_size(&self) -> Option<usize> {
         match self {
             Self::Indirect { lhs, rhs } => {

@@ -283,7 +283,6 @@ struct SingleEncoding<'a> {
     name: Option<String>,
     encoding: InstructionEncoding,
     body: Option<&'a TokenStream>,
-    has_multiple_encodings: bool,
 }
 
 impl Display for SingleEncoding<'_> {
@@ -307,7 +306,7 @@ impl Display for SingleEncoding<'_> {
             }
         }
 
-        if !self.encoding.parameters.is_empty() && self.has_multiple_encodings {
+        if !self.encoding.parameters.is_empty() {
             write!(
                 f,
                 ", {}",
@@ -981,7 +980,6 @@ impl State {
                             name: definition.name.clone(),
                             encoding,
                             body: definition.body.as_ref(),
-                            has_multiple_encodings: definition.encodings.len() > 1,
                         })
                         .ok()
                 })

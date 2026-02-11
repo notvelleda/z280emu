@@ -1,0 +1,11 @@
+[package]
+name = "z280emu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitfields = "1"
+bitmask-enum = "2"
+env_logger = "0.11.8"
+instruction_decoder = { path = "../instruction_decoder" }
+log = "0.4.29"

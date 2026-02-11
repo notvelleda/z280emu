@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["instruction_decoder", "z280emu"]

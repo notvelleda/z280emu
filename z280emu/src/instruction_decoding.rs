@@ -493,6 +493,16 @@ decode_instructions! {
             0b110 => indirect(Register::IY + imm16()),
             0b111 => indirect(Register::HL + imm16()),
         },
+        t_encoding: {
+            0b000 => const(0x00),
+            0b001 => const(0x08),
+            0b010 => const(0x10),
+            0b011 => const(0x18),
+            0b100 => const(0x20),
+            0b101 => const(0x28),
+            0b110 => const(0x30),
+            0b111 => const(0x38),
+        },
     },
     instructions: {
         "ADC (byte form)": [
@@ -538,7 +548,19 @@ decode_instructions! {
         "CPL": ["00_101_111"] => unimplemented,
         "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
         "DAA": ["00_100_111"] => unimplemented,
-        "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => unimplemented,
+        "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => {
+            let value: u8 = dst.get(cpu_state);
+            let result = (value as i8).checked_sub(1);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(result.unwrap_or_default() < 0);
+            flags.set_zero(result.unwrap_or_default() == 0);
+            flags.set_half_carry((value as i8 ^ (-1) ^ result.unwrap_or_default()) & 0x10 != 0);
+            flags.set_parity_overflow(result.is_none());
+            flags.set_add_subtract(true);
+
+            dst.set(cpu_state, result.unwrap_or_default() as u8);
+        },
         "DEC (word form)": ["00_**1_011", dst: rr_expanded(4..6)] => unimplemented,
         "DI": [
             "11_110_011", mask: const(0x7f),
@@ -584,8 +606,23 @@ decode_instructions! {
             "01_***_000" (EDPrefix), src: Register::C, dst: r(3..6) | ix_iy_components(3..6) | extended_indirect_modes(3..6),
             "11_011_011", src: imm8(), dst: Register::A,
         ] => unimplemented,
-        "INC (byte form)": ["00_***_100", dst: src_dst(3..6)] => unimplemented,
-        "INC (word form)": ["00_**0_011", dst: rr_expanded(4..6)] => unimplemented,
+        "INC (byte form)": ["00_***_100", dst: src_dst(3..6)] => {
+            let value: u8 = dst.get(cpu_state);
+            let result = value.checked_add(1);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result.unwrap_or_default() & 0b1000_0000) != 0);
+            flags.set_zero(result.unwrap_or_default() == 0);
+            flags.set_half_carry((value ^ 1 ^ result.unwrap_or_default()) & 0x10 != 0);
+            flags.set_parity_overflow(result.is_none());
+            flags.set_add_subtract(false);
+
+            dst.set(cpu_state, result.unwrap_or_default());
+        },
+        "INC (word form)": ["00_**0_011", dst: rr_expanded(4..6)] => {
+            let value: u16 = dst.get(cpu_state);
+            dst.set(cpu_state, value.wrapping_add(1));
+        },
         "IND": ["10_101_010" (EDPrefix)] => unimplemented,
         "INDW": ["10_001_010" (EDPrefix)] => unimplemented,
         "INDR": ["10_111_010" (EDPrefix)] => unimplemented,
@@ -598,12 +635,16 @@ decode_instructions! {
         "JAF": ["00_101_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
         "JAR": ["00_100_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
         "JP": [
+            // JP
             "11_***_010" (IXOverride), cc: cc(3..6), dst: indirect(Register::HL),
             "11_101_001", cc: ConditionCode::Always, dst: indirect(hl()),
             "11_***_010", cc: cc(3..6), dst: imm16(),
             "11_000_011", cc: ConditionCode::Always, dst: imm16(),
             "11_***_010" (IYOverride), cc: cc(3..6), dst: indirect(Register::PC + imm16()),
             "11_000_011" (IYOverride), cc: ConditionCode::Always, dst: indirect(Register::PC + imm16()),
+
+            // JR
+            "00_***_000", cc: cc_simplified(3..6), dst: indirect(Register::PC + imm8())
         ] => {
             let target: u16 = dst.get(cpu_state);
 
@@ -611,7 +652,6 @@ decode_instructions! {
                 Register::PC.set(cpu_state, target);
             }
         },
-        "JR": ["00_***_000", cc: cc_simplified(3..6), addr: indirect(Register::PC + imm8())] => unimplemented,
         "LD (byte)": [
             // LD A, *
 
@@ -703,7 +743,9 @@ decode_instructions! {
             // DA is a duplicate of LDW
             // X, RA, SR, BX
             "00_***_010" (EDPrefix), src: lda_extended(3..6), dst: hl(),
-        ] => unimplemented,
+        ] => {
+            dst.set(cpu_state, u16::try_from(src.address).unwrap());
+        },
         "LDCTL": [
             "01_100_110" (EDPrefix), src: Register::C, dst: hl(),
             "01_101_110" (EDPrefix), src: hl(), dst: Register::C,
@@ -785,7 +827,7 @@ decode_instructions! {
             "00_001_111", dst: Register::A,
         ] => unimplemented,
         "RRD": ["01_100_111" (EDPrefix)] => unimplemented,
-        "RST": ["11_***_111", t: imm_unsigned(3..6)] => unimplemented,
+        "RST": ["11_***_111", addr: t_encoding(3..6)] => unimplemented,
         "SBC (byte form)": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_011_***", src: src_dst(0..3),
@@ -813,7 +855,21 @@ decode_instructions! {
             "10_101_***", src: src_dst(0..3),
             // IM
             "11_101_110", src: imm8(),
-        ] => unimplemented,
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+            let result = a ^ src;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            flags.set_add_subtract(false);
+            flags.set_carry(false);
+
+            Register::A.set(cpu_state, result);
+        },
         // TODO: EPU instructions
     },
     invalid_instruction_handler: {

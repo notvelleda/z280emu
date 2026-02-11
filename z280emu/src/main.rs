@@ -1,4 +1,4 @@
-use log::info;
+use log::{debug, info};
 
 pub mod instruction_decoding;
 pub mod registers;
@@ -64,6 +64,17 @@ impl BusAccessor for SimpleBusAccessor {
     }
 }
 
+pub fn calculate_parity(mut value: u16) -> bool {
+    let mut parity = false;
+
+    while value != 0 {
+        parity ^= (value & 1) != 0;
+        value >>= 1;
+    }
+
+    parity
+}
+
 fn main() {
     env_logger::init();
 
@@ -96,5 +107,6 @@ fn main() {
 
     for _i in 0..16 {
         decoder.decode_instruction(&mut cpu_state);
+        debug!("output byte is {}", cpu_state.bus_accessor.memory[9]);
     }
 }

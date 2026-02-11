@@ -289,15 +289,37 @@ pub enum ConditionCode {
     /// C
     C,
     /// PO/NV
-    PONV,
+    PO,
     /// PE/V
-    PEV,
+    PE,
     /// P/NS
-    PNS,
+    P,
     /// M/S
-    MS,
+    M,
     /// Unconditional
     Always,
+}
+
+impl ConditionCode {
+    const fn is_condition_met<T: BusAccessor>(&self, cpu_state: &super::CPUState<T>) -> bool {
+        if matches!(self, Self::Always) {
+            return true;
+        }
+
+        let flags = cpu_state.register_file.current_af_bank().f;
+
+        match self {
+            Self::NZ => !flags.zero(),
+            Self::Z => flags.zero(),
+            Self::NC => !flags.carry(),
+            Self::C => flags.carry(),
+            Self::PO => !flags.parity_overflow(),
+            Self::PE => flags.parity_overflow(),
+            Self::P => !flags.sign(),
+            Self::M => flags.sign(),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -310,6 +332,7 @@ pub enum InterruptMode {
 
 decode_instructions! {
     instruction_word_size: 1,
+    trace_instructions: true,
     prefixes: {
         0b11001011 => CBPrefix,
         0b11101101 => EDPrefix,
@@ -433,10 +456,10 @@ decode_instructions! {
             0b001 => ConditionCode::Z,
             0b010 => ConditionCode::NC,
             0b011 => ConditionCode::C,
-            0b100 => ConditionCode::PONV,
-            0b101 => ConditionCode::PEV,
-            0b110 => ConditionCode::PNS,
-            0b111 => ConditionCode::MS,
+            0b100 => ConditionCode::PO,
+            0b101 => ConditionCode::PE,
+            0b110 => ConditionCode::P,
+            0b111 => ConditionCode::M,
         },
         cc_simplified: {
             0b011 => ConditionCode::Always,
@@ -472,204 +495,104 @@ decode_instructions! {
             "10_001_***", src: src_dst(0..3),
             // IM
             "11_001_110", src: imm8(),
-        ] => {
-            info!("ADC (byte form), src: {src:?}");
-        },
-        "ADC (word form)": ["01_**1_010" (EDPrefix), src: rr(4..6), dst: hl()] => {
-            info!("ADC (word form), src: {src:?}, dst: {dst:?}");
-        },
-        "ADD": ["01_101_101" (EDPrefix), dst: hl()] => {
-            info!("ADD, dst: {dst:?}");
-        },
+        ] => unimplemented,
+        "ADC (word form)": ["01_**1_010" (EDPrefix), src: rr(4..6), dst: hl()] => unimplemented,
+        "ADD": ["01_101_101" (EDPrefix), dst: hl()] => unimplemented,
         "ADD (byte form)": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_000_***", src: src_dst(0..3),
             // IM
             "11_000_110", src: imm8(),
-        ] => {
-            info!("ADD (byte form), src: {src:?}");
-        },
-        "ADD (word form)": ["00_**1_001", src: rr(4..6), dst: hl()] => {
-            info!("ADD (word form), src: {src:?}, dst: {dst:?}");
-        },
-        "ADDW": ["11_**0_110" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("ADDW, src: {src:?}");
-        },
+        ] => unimplemented,
+        "ADD (word form)": ["00_**1_001", src: rr(4..6), dst: hl()] => unimplemented,
+        "ADDW": ["11_**0_110" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
         "AND": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_100_***", src: src_dst(0..3),
             // IM
             "11_100_110", src: imm8(),
-        ] => {
-            info!("AND, src: {src:?}");
-        },
-        "BIT": ["01_***_***" (CBPrefix), b: imm_signed(3..6), r: r(0..3) | hl_indirection(0..3)] => {
-            info!("BIT, b: {b:?}, r: {r:?}");
-        },
+        ] => unimplemented,
+        "BIT": ["01_***_***" (CBPrefix), b: imm_signed(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "CALL": [
             // conditional call
             "11_***_100", cc: cc(3..6), addr: call_addr(),
             // unconditional call
             "11_001_101", cc: ConditionCode::Always, addr: call_addr(),
-        ] => {
-            info!("CALL, cc: {cc:?}, addr: {addr:?}");
-        },
-        "CCF": ["00_111_111"] => {
-            info!("CCF");
-        },
+        ] => unimplemented,
+        "CCF": ["00_111_111"] => unimplemented,
         "CP": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_111_***", src: src_dst(0..3),
             // IM
             "11_111_110", src: imm8(),
-        ] => {
-            info!("CP, src: {src:?}");
-        },
-        "CPD": ["10_101_001" (EDPrefix)] => {
-            info!("CPD");
-        },
-        "CPDR": ["10_111_001" (EDPrefix)] => {
-            info!("CPDR");
-        },
+        ] => unimplemented,
+        "CPD": ["10_101_001" (EDPrefix)] => unimplemented,
+        "CPDR": ["10_111_001" (EDPrefix)] => unimplemented,
         // CPI
-        ["10_100_001" (EDPrefix)] => {
-            info!("CPI");
-        },
-        "CPIR": ["10_110_001" (EDPrefix)] => {
-            info!("CPIR");
-        },
-        "CPL": ["00_101_111"] => {
-            info!("CPL");
-        },
-        "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("CPW, src: {src:?}");
-        },
-        "DAA": ["00_100_111"] => {
-            info!("DAA");
-        },
-        "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => {
-            info!("DEC (byte form), dst: {dst:?}");
-        },
-        "DEC (word form)": ["00_**1_011", dst: rr_expanded(4..6)] => {
-            info!("DEC (word form), dst: {dst:?}");
-        },
+        ["10_100_001" (EDPrefix)] => unimplemented,
+        "CPIR": ["10_110_001" (EDPrefix)] => unimplemented,
+        "CPL": ["00_101_111"] => unimplemented,
+        "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        "DAA": ["00_100_111"] => unimplemented,
+        "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => unimplemented,
+        "DEC (word form)": ["00_**1_011", dst: rr_expanded(4..6)] => unimplemented,
         "DI": [
             "11_110_011", mask: const(0x7f),
             "01_110_111" (EDPrefix), mask: imm8(),
-        ] => {
-            info!("DI, mask: {mask:?}");
-        },
+        ] => unimplemented,
         "DIV": [
             "11_***_100" (EDPrefix), src: src_dst(3..6),
             "11_111_100" (EDPrefix + IYOverride), src: imm8(),
-        ] => {
-            info!("DIV (byte form), src: {src:?}");
-        },
+        ] => unimplemented,
         "DIVU": [
             "11_***_101" (EDPrefix), src: src_dst(3..6),
             "11_111_101" (EDPrefix + IYOverride), src: imm8(),
-        ] => {
-            info!("DIVU (byte form), src: {src:?}");
-        },
-        "DIVUW": ["11_**1_011" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("DIVUW, src: {src:?}");
-        },
-        "DIVW": ["11_**1_010" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("DIVW, src: {src:?}");
-        },
+        ] => unimplemented,
+        "DIVUW": ["11_**1_011" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        "DIVW": ["11_**1_010" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
         "DJNZ": ["00_010_000", addr: indirect(Register::PC + imm8())] => {
             info!("DJNZ, addr: {addr:?}")
         },
         "EI": [
             "11_111_011", mask: const(0x7f),
             "01_111_111" (EDPrefix), mask: imm8(),
-        ] => {
-            info!("EI, mask: {mask:?}");
-        },
-        "EX AF, AF'": ["00_001_000"] => {
-            info!("EX AF, AF'");
-        },
-        "EX (SP)": ["11_100_011", dst: hl()] => {
-            info!("EX (SP), dst: {dst:?}");
-        },
-        "EX H, L": ["11_101_111" (EDPrefix)] => {
-            info!("EX H, L");
-        },
+        ] => unimplemented,
+        "EX AF, AF'": ["00_001_000"] => unimplemented,
+        "EX (SP)": ["11_100_011", dst: hl()] => unimplemented,
+        "EX H, L": ["11_101_111" (EDPrefix)] => unimplemented,
         "EX HL": [
             "11_101_011", src: Register::DE,
             "11_101_011" (IXOverride), src: Register::IX,
             "11_101_011" (IYOverride), src: Register::IY,
-        ] => {
-            info!("EX HL, src: {src:?}");
-        },
-        "EX A": ["00_***_111" (EDPrefix), src: src_dst(3..6)] => {
-            info!("EX A, src: {src:?}");
-        },
-        "EXTS (byte form)": ["10_100_100" (EDPrefix)] => {
-            info!("EXTS (byte form)");
-        },
-        "EXTS (word form)": ["10_101_100" (EDPrefix)] => {
-            info!("EXTS (word form)");
-        },
-        "EXX": ["11_011_001"] => {
-            info!("EXX");
-        },
-        "HALT": ["01_110_110"] => {
-            info!("HALT");
-        },
+        ] => unimplemented,
+        "EX A": ["00_***_111" (EDPrefix), src: src_dst(3..6)] => unimplemented,
+        "EXTS (byte form)": ["10_100_100" (EDPrefix)] => unimplemented,
+        "EXTS (word form)": ["10_101_100" (EDPrefix)] => unimplemented,
+        "EXX": ["11_011_001"] => unimplemented,
+        "HALT": ["01_110_110"] => unimplemented,
         "IM": [
             "01_000_110" (EDPrefix), p: InterruptMode::Mode0,
             "01_010_110" (EDPrefix), p: InterruptMode::Mode1,
             "01_011_110" (EDPrefix), p: InterruptMode::Mode2,
             "01_001_110" (EDPrefix), p: InterruptMode::Mode3,
-        ] => {
-            info!("IM, p: {p:?}");
-        },
+        ] => unimplemented,
         "IN": [
             "01_***_000" (EDPrefix), src: Register::C, dst: r(3..6) | ix_iy_components(3..6) | extended_indirect_modes(3..6),
             "11_011_011", src: imm8(), dst: Register::A,
-        ] => {
-            info!("IN, src: {src:?}, dst: {dst:?}");
-        },
-        "INC (byte form)": ["00_***_100", dst: src_dst(3..6)] => {
-            info!("INC (byte form), dst: {dst:?}");
-        },
-        "INC (word form)": ["00_**0_011", dst: rr_expanded(4..6)] => {
-            info!("INC (word form), dst: {dst:?}");
-        },
-        "IND": ["10_101_010" (EDPrefix)] => {
-            info!("IND");
-        },
-        "INDW": ["10_001_010" (EDPrefix)] => {
-            info!("INDW");
-        },
-        "INDR": ["10_111_010" (EDPrefix)] => {
-            info!("INDR");
-        },
-        "INDRW": ["10_011_010" (EDPrefix)] => {
-            info!("INDRW");
-        },
-        "INI": ["10_100_010" (EDPrefix)] => {
-            info!("INI");
-        },
-        "INIW": ["10_000_010" (EDPrefix)] => {
-            info!("INIW");
-        },
-        "INIR": ["10_110_010" (EDPrefix)] => {
-            info!("INIR");
-        },
-        "INIRW": ["10_010_010" (EDPrefix)] => {
-            info!("INIRW");
-        },
-        "IN HL": ["10_110_111" (EDPrefix)] => {
-            info!("IN HL");
-        },
-        "JAF": ["00_101_000" (IXOverride), addr: indirect(Register::PC + imm8())] => {
-            info!("JAF, addr: {addr:?}");
-        },
-        "JAR": ["00_100_000" (IXOverride), addr: indirect(Register::PC + imm8())] => {
-            info!("JAR, addr: {addr:?}");
-        },
+        ] => unimplemented,
+        "INC (byte form)": ["00_***_100", dst: src_dst(3..6)] => unimplemented,
+        "INC (word form)": ["00_**0_011", dst: rr_expanded(4..6)] => unimplemented,
+        "IND": ["10_101_010" (EDPrefix)] => unimplemented,
+        "INDW": ["10_001_010" (EDPrefix)] => unimplemented,
+        "INDR": ["10_111_010" (EDPrefix)] => unimplemented,
+        "INDRW": ["10_011_010" (EDPrefix)] => unimplemented,
+        "INI": ["10_100_010" (EDPrefix)] => unimplemented,
+        "INIW": ["10_000_010" (EDPrefix)] => unimplemented,
+        "INIR": ["10_110_010" (EDPrefix)] => unimplemented,
+        "INIRW": ["10_010_010" (EDPrefix)] => unimplemented,
+        "IN HL": ["10_110_111" (EDPrefix)] => unimplemented,
+        "JAF": ["00_101_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
+        "JAR": ["00_100_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
         "JP": [
             "11_***_010" (IXOverride), cc: cc(3..6), dst: indirect(Register::HL),
             "11_101_001", cc: ConditionCode::Always, dst: indirect(hl()),
@@ -678,12 +601,14 @@ decode_instructions! {
             "11_***_010" (IYOverride), cc: cc(3..6), dst: indirect(Register::PC + imm16()),
             "11_000_011" (IYOverride), cc: ConditionCode::Always, dst: indirect(Register::PC + imm16()),
         ] => {
-            info!("JP, cc: {cc:?}, dst: {dst:?}");
+            let target: u16 = dst.get(cpu_state);
+
+            if cc.is_condition_met(cpu_state) {
+                Register::PC.set(cpu_state, target);
+            }
         },
-        "JR": ["00_***_000", cc: cc_simplified(3..6), addr: indirect(Register::PC + imm8())] => {
-            info!("JR, cc: {cc:?}, addr: {addr:?}");
-        },
-        "LD": [
+        "JR": ["00_***_000", cc: cc_simplified(3..6), addr: indirect(Register::PC + imm8())] => unimplemented,
+        "LD (byte)": [
             // LD A, *
 
             // R is a duplicate of LD register (byte)
@@ -707,16 +632,6 @@ decode_instructions! {
             // DA
             "00_110_010", src: Register::A, dst: indirect(imm16()),
 
-            // LD A, I
-            "01_010_111" (EDPrefix), src: Register::I, dst: Register::A,
-            // LD A, R
-            "01_011_111" (EDPrefix), src: Register::R, dst: Register::A,
-
-            // LD I, A
-            "01_000_111" (EDPrefix), src: Register::A, dst: Register::I,
-            // LD R, A
-            "01_001_111" (EDPrefix), src: Register::A, dst: Register::R,
-
             // LD immediate (byte)
             "00_***_110", dst: src_dst(3..6), src: imm8(),
 
@@ -725,7 +640,11 @@ decode_instructions! {
             // R, RX, IR, SX
             "01_***_***", src: r(0..3) | hl_indirection(0..3) | ix_iy_components(0..3), dst: r(3..6) | hl_indirection(3..6) | ix_iy_components(3..6),
             // IM is a duplicate of LD immediate (byte)
-
+        ] => {
+            let value: u8 = src.get(cpu_state);
+            dst.set(cpu_state, value);
+        },
+        "LD (word)": [
             // LDW
             "00_**0_001", dst: rr(4..6) | rr_ix_expansion(4..6), src: imm16(),
 
@@ -762,232 +681,141 @@ decode_instructions! {
             "01_111_011" (EDPrefix), src: indirect(imm16()), dst: Register::SP,
             "01_110_011" (EDPrefix), src: Register::SP, dst: indirect(imm16()),
         ] => {
-            info!("LD, src: {src:?}, dst: {dst:?}");
+            let value: u16 = src.get(cpu_state);
+            dst.set(cpu_state, value);
         },
+        "LD from/to I, R": [
+            // LD A, I
+            "01_010_111" (EDPrefix), src: Register::I, dst: Register::A,
+            // LD A, R
+            "01_011_111" (EDPrefix), src: Register::R, dst: Register::A,
+
+            // LD I, A
+            "01_000_111" (EDPrefix), src: Register::A, dst: Register::I,
+            // LD R, A
+            "01_001_111" (EDPrefix), src: Register::A, dst: Register::R,
+        ] => unimplemented,
         "LDA": [
             // DA is a duplicate of LDW
             // X, RA, SR, BX
             "00_***_010" (EDPrefix), src: lda_extended(3..6), dst: hl(),
-        ] => {
-            info!("LDA, src: {src:?}, dst: {dst:?}");
-        },
+        ] => unimplemented,
         "LDCTL": [
             "01_100_110" (EDPrefix), src: Register::C, dst: hl(),
             "01_101_110" (EDPrefix), src: hl(), dst: Register::C,
             "10_000_111" (EDPrefix), src: Register::USP, dst: hl(),
             "10_001_111" (EDPrefix), src: hl(), dst: Register::USP,
-        ] => {
-            info!("LDCTL, src: {src:?}, dst: {dst:?}");
-        },
-        "LDD": ["10_101_000" (EDPrefix)] => {
-            info!("LDD");
-        },
-        "LDDR": ["10_111_000" (EDPrefix)] => {
-            info!("LDDR");
-        },
-        "LDI": ["10_100_000" (EDPrefix)] => {
-            info!("LDI");
-        },
-        "LDIR": ["10_110_000" (EDPrefix)] => {
-            info!("LDIR");
-        },
+        ] => unimplemented,
+        "LDD": ["10_101_000" (EDPrefix)] => unimplemented,
+        "LDDR": ["10_111_000" (EDPrefix)] => unimplemented,
+        "LDI": ["10_100_000" (EDPrefix)] => unimplemented,
+        "LDIR": ["10_110_000" (EDPrefix)] => unimplemented,
         "LDUD": [
             "10_000_110" (EDPrefix), src: hl_indirect_sx(), dst: Register::A,
             "10_001_110" (EDPrefix), src: Register::A, dst: hl_indirect_sx(),
-        ] => {
-            info!("LDUD, src: {src:?}, dst: {dst:?}");
-        },
+        ] => unimplemented,
         "LDUP": [
             "10_010_110" (EDPrefix), src: hl_indirect_sx(), dst: Register::A,
             "10_011_110" (EDPrefix), src: Register::A, dst: hl_indirect_sx(),
-        ] => {
-            info!("LDUP, src: {src:?}, dst: {dst:?}");
-        },
+        ] => unimplemented,
         "MULT": [
             "11_***_000" (EDPrefix), src: src_dst(3..6),
             "11_111_000" (EDPrefix + IYOverride), src: imm8(),
-        ] => {
-            info!("MULT, src: {src:?}");
-        },
+        ] => unimplemented,
         "MULTU": [
             "11_***_001" (EDPrefix), src: src_dst(3..6),
             "11_111_001" (EDPrefix + IYOverride), src: imm8(),
-        ] => {
-            info!("MULTU, src: {src:?}");
-        },
-        "MULTUW": ["11_**0_011" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("MULTUW, src: {src:?}");
-        },
-        "MULTW": ["11_**0_010" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("MULTW, src: {src:?}");
-        },
+        ] => unimplemented,
+        "MULTUW": ["11_**0_011" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        "MULTW": ["11_**0_010" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
         "NEG": [
             "01_000_100" (EDPrefix), register: Register::A,
             "01_001_100" (EDPrefix), register: Register::HL,
-        ] => {
-            info!("NEG, register: {register:?}");
-        },
-        "NOP": ["00_000_000"] => {
-            info!("NOP");
-        },
-        "OR": ["10_110_***", src: src_dst(0..3)] => {
-            info!("OR, src: {src:?}");
-        },
-        "OTDR": ["10_111_011" (EDPrefix)] => {
-            info!("OTDR");
-        },
-        "OTDRW": ["10_011_011" (EDPrefix)] => {
-            info!("OTDRW");
-        },
-        "OTIR": ["10_110_011" (EDPrefix)] => {
-            info!("OTIR");
-        },
-        "OTIRW": ["10_010_011" (EDPrefix)] => {
-            info!("OTIRW");
-        },
+        ] => unimplemented,
+        "NOP": ["00_000_000"] => unimplemented,
+        "OR": ["10_110_***", src: src_dst(0..3)] => unimplemented,
+        "OTDR": ["10_111_011" (EDPrefix)] => unimplemented,
+        "OTDRW": ["10_011_011" (EDPrefix)] => unimplemented,
+        "OTIR": ["10_110_011" (EDPrefix)] => unimplemented,
+        "OTIRW": ["10_010_011" (EDPrefix)] => unimplemented,
         "OUT": [
             "01_***_001" (EDPrefix), src: r(3..6) | ix_iy_components(3..6) | extended_indirect_modes(3..6), dst: Register::C,
             "11_010_011", src: Register::A, dst: imm8(),
-        ] => {
-            info!("OUT, src: {src:?}, dst: {dst:?}");
-        },
-        "OUTD": ["10_101_011" (EDPrefix)] => {
-            info!("OUTD");
-        },
-        "OUTDW": ["10_001_011" (EDPrefix)] => {
-            info!("OUTDW");
-        },
-        "OUTI": ["10_100_011" (EDPrefix)] => {
-            info!("OUTI");
-        },
-        "OUTIW": ["10_000_011" (EDPrefix)] => {
-            info!("OUTIW");
-        },
-        "OUT HL": ["10_111_111" (EDPrefix)] => {
-            info!("OUT HL");
-        },
-        "PCACHE": ["01_100_101" (EDPrefix)] => {
-            info!("PCACHE");
-        },
-        "POP": ["11_**0_001", dst: rr(4..6) | rr_ix_expansion(4..6)] => {
-            info!("POP, dst: {dst:?}");
-        },
+        ] => unimplemented,
+        "OUTD": ["10_101_011" (EDPrefix)] => unimplemented,
+        "OUTDW": ["10_001_011" (EDPrefix)] => unimplemented,
+        "OUTI": ["10_100_011" (EDPrefix)] => unimplemented,
+        "OUTIW": ["10_000_011" (EDPrefix)] => unimplemented,
+        "OUT HL": ["10_111_111" (EDPrefix)] => unimplemented,
+        "PCACHE": ["01_100_101" (EDPrefix)] => unimplemented,
+        "POP": ["11_**0_001", dst: rr(4..6) | rr_ix_expansion(4..6)] => unimplemented,
         "PUSH": [
             // R, IR, DA, RA
             "11_**0_101", src: rr(4..6) | rr_ix_expansion(4..6),
             // IM
             "11_110_101" (IYOverride), src: imm16(),
-        ] => {
-            info!("PUSH, src: {src:?}");
-        },
-        "RES": ["10_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("RES, b: {b:?}, dst: {dst:?}");
-        },
+        ] => unimplemented,
+        "RES": ["10_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "RET": [
             "11_***_000", cc: cc(3..6),
             "11_001_001", cc: ConditionCode::Always,
-        ] => {
-            info!("RET, cc: {cc:?}");
-        },
-        "RETI": ["01_001_101" (EDPrefix)] => {
-            info!("RETI");
-        },
-        "RETIL": ["01_010_101" (EDPrefix)] => {
-            info!("RETIL");
-        },
-        "RETN": ["01_000_101" (EDPrefix)] => {
-            info!("RETN");
-        },
+        ] => unimplemented,
+        "RETI": ["01_001_101" (EDPrefix)] => unimplemented,
+        "RETIL": ["01_010_101" (EDPrefix)] => unimplemented,
+        "RETN": ["01_000_101" (EDPrefix)] => unimplemented,
         "RL": [
             "00_010_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
             "00_010_111", dst: Register::A,
-        ] => {
-            info!("RL, dst: {dst:?}");
-        },
+        ] => unimplemented,
         "RLC": [
             "00_000_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
             "00_000_111", dst: Register::A,
-        ] => {
-            info!("RLC, dst: {dst:?}");
-        },
-        "RLD": ["01_101_111" (EDPrefix)] => {
-            info!("RLD");
-        },
+        ] => unimplemented,
+        "RLD": ["01_101_111" (EDPrefix)] => unimplemented,
         "RR": [
             "00_011_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
             "00_011_111", dst: Register::A,
-        ] => {
-            info!("RR, dst: {dst:?}");
-        },
+        ] => unimplemented,
         "RRC": [
             "00_001_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
             "00_001_111", dst: Register::A,
-        ] => {
-            info!("RRC, dst: {dst:?}");
-        },
-        "RRD": ["01_100_111" (EDPrefix)] => {
-            info!("RRD");
-        },
-        "RST": ["11_***_111", t: imm_unsigned(3..6)] => {
-            info!("RST, t: {t:?}");
-        },
+        ] => unimplemented,
+        "RRD": ["01_100_111" (EDPrefix)] => unimplemented,
+        "RST": ["11_***_111", t: imm_unsigned(3..6)] => unimplemented,
         "SBC (byte form)": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_011_***", src: src_dst(0..3),
             // IM
             "11_011_110", src: imm8(),
-        ] => {
-            info!("SBC (byte form), src: {src:?}");
-        },
-        "SBC (word form)": ["01_**0_010" (EDPrefix), src: rr(4..6), dst: hl()] => {
-            info!("SBC (word form), src: {src:?}, dst: {dst:?}");
-        },
-        "SC": ["01_110_001" (EDPrefix), nn: imm16()] => {
-            info!("SC, nn: {nn:?}");
-        },
-        "SCF": ["0_110_111"] => {
-            info!("SCF");
-        },
-        "SET": ["11_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("SET, b: {b:?}, dst: {dst:?}");
-        },
-        "SLA": ["00_100_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("SLA, dst: {dst:?}");
-        },
-        "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("SRA, dst: {dst:?}");
-        },
-        "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("SRL, dst: {dst:?}");
-        },
+        ] => unimplemented,
+        "SBC (word form)": ["01_**0_010" (EDPrefix), src: rr(4..6), dst: hl()] => unimplemented,
+        "SC": ["01_110_001" (EDPrefix), nn: imm16()] => unimplemented,
+        "SCF": ["0_110_111"] => unimplemented,
+        "SET": ["11_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "SLA": ["00_100_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "SUB": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_010_***", src: src_dst(0..3),
             // IM
             "11_010_110", src: imm8(),
-        ] => {
-            info!("SUB, src: {src:?}");
-        },
-        "SUBW": ["11_**1_110" (EDPrefix), src: rr_expanded(4..6)] => {
-            info!("SUBW, src: {src:?}");
-        },
-        "TSET": ["00_110_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
-            info!("TSET, dst: {dst:?}");
-        },
-        "TSTI": ["01_110_000" (EDPrefix)] => {
-            info!("TSTI");
-        },
+        ] => unimplemented,
+        "SUBW": ["11_**1_110" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        "TSET": ["00_110_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "TSTI": ["01_110_000" (EDPrefix)] => unimplemented,
         "XOR": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_101_***", src: src_dst(0..3),
             // IM
             "11_101_110", src: imm8(),
-        ] => {
-            info!("XOR, src: {src:?}");
-        },
+        ] => unimplemented,
         // TODO: EPU instructions
     },
     invalid_instruction_handler: {
         warn!("invalid instruction {opcode:#x} with prefixes {prefixes:?}");
+    },
+    unimplemented_instruction_handler: {
+        warn!("unimplemented instruction {instruction_as_string}");
     },
 }

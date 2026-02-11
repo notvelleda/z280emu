@@ -71,32 +71,32 @@ pub struct RegisterFile {
 
 impl RegisterFile {
     /// returns a reference to the set of accumulator and flags registers currently in use
-    pub fn current_af_bank(&self) -> &AFBank {
+    pub const fn current_af_bank(&self) -> &AFBank {
         &self.af_bank[self.af_bank_index]
     }
 
     /// returns a mutable reference to the set of accumulator and flags registers currently in use
-    pub fn current_af_bank_mut(&mut self) -> &mut AFBank {
+    pub const fn current_af_bank_mut(&mut self) -> &mut AFBank {
         &mut self.af_bank[self.af_bank_index]
     }
 
     /// returns a reference to the set of other byte/word registers currently in use
-    pub fn current_x_bank(&self) -> &ExtendedBank {
+    pub const fn current_x_bank(&self) -> &ExtendedBank {
         &self.x_bank[self.x_bank_index]
     }
 
     /// returns a mutable reference to the set of other byte/word registers currently in use
-    pub fn current_x_bank_mut(&mut self) -> &mut ExtendedBank {
+    pub const fn current_x_bank_mut(&mut self) -> &mut ExtendedBank {
         &mut self.x_bank[self.x_bank_index]
     }
 
     /// returns a reference to the stack pointer currently in use
-    pub fn current_stack_pointer(&self) -> &u16 {
+    pub const fn current_stack_pointer(&self) -> &u16 {
         &self.stack_pointers[self.stack_pointer_index]
     }
 
     /// returns a mutable reference to the stack pointer currently in use
-    pub fn current_stack_pointer_mut(&mut self) -> &mut u16 {
+    pub const fn current_stack_pointer_mut(&mut self) -> &mut u16 {
         &mut self.stack_pointers[self.stack_pointer_index]
     }
 }

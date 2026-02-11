@@ -270,14 +270,14 @@ struct PrefixSet {
 struct InstructionDefinition {
     name: Option<String>,
     encodings: Vec<InstructionEncoding>,
-    body: TokenStream,
+    body: Option<TokenStream>,
 }
 
 #[derive(Debug, Clone)]
 struct SingleEncoding<'a> {
     name: Option<String>,
     encoding: InstructionEncoding,
-    body: &'a TokenStream,
+    body: Option<&'a TokenStream>,
     has_multiple_encodings: bool,
 }
 
@@ -317,11 +317,13 @@ impl Display for SingleEncoding<'_> {
 #[derive(Default)]
 struct State {
     instruction_word_size: usize,
+    should_trace_instructions: bool,
     prefix_set: PrefixSet,
     prefix_lists: AHashSet<Vec<PrefixCombinationEntry>>,
     addressing_modes: AHashMap<String, AddressingMode>,
     instruction_definitions: Vec<InstructionDefinition>,
     invalid_instruction_handler: Option<TokenStream>,
+    unimplemented_instruction_handler: Option<TokenStream>,
 }
 
 impl State {
@@ -350,12 +352,19 @@ impl State {
                         "addressing_modes" => self.parse_addressing_modes_group(token_stream),
                         "instructions" => self.parse_instructions_group(token_stream),
                         "invalid_instruction_handler" => self.invalid_instruction_handler = Some(token_stream),
+                        "unimplemented_instruction_handler" => self.unimplemented_instruction_handler = Some(token_stream),
                         _ => panic!("unknown group name \"{identifier}\""),
                     };
                 }
                 Some(TokenTree::Literal(literal)) => {
                     match identifier.to_string().as_str() {
                         "instruction_word_size" => self.instruction_word_size = Self::parse_integer(literal),
+                        _ => panic!("unknown constant name \"{identifier}\""),
+                    };
+                }
+                Some(TokenTree::Ident(other_ident)) => {
+                    match identifier.to_string().as_str() {
+                        "trace_instructions" => self.should_trace_instructions = Self::parse_boolean(other_ident),
                         _ => panic!("unknown constant name \"{identifier}\""),
                     };
                 }
@@ -372,6 +381,14 @@ impl State {
 
         assert!(self.instruction_word_size != 0, "instruction word size must be defined");
         assert!(self.invalid_instruction_handler.is_some(), "missing invalid instruction handler");
+
+        if self.unimplemented_instruction_handler.is_none() {
+            warn!("unimplemented instruction handler wasn't provided, using default implementation that will panic");
+
+            self.unimplemented_instruction_handler = Some(quote! {
+                panic!("unimplemented instruction {instruction_as_string}");
+            });
+        }
 
         self.check_prefix_definitions();
         self.build_tables()
@@ -391,6 +408,14 @@ impl State {
             usize::from_str_radix(if radix == 10 { &literal_string } else { &literal_string[2..] }, radix).expect("expected integer literal")
         } else {
             literal_string.parse().expect("expected integer literal")
+        }
+    }
+
+    fn parse_boolean(identifier: Ident) -> bool {
+        match identifier.to_string().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => panic!("expected boolean"),
         }
     }
 
@@ -803,10 +828,11 @@ impl State {
 
             assert!(Self::parse_arrow(&mut token_iterator), "expected \"=>\"");
 
-            let Some(TokenTree::Group(body_group)) = token_iterator.next() else {
-                panic!("expected brace-delimited group");
+            let body = match token_iterator.next() {
+                Some(TokenTree::Group(body_group)) if body_group.delimiter() == Delimiter::Brace => Some(body_group.stream()),
+                Some(TokenTree::Ident(identifier)) if identifier.to_string() == "unimplemented" => None,
+                _ => panic!("expected brace-delimited group or \"unimplemented\""),
             };
-            assert!(body_group.delimiter() == Delimiter::Brace, "expected brace-delimited group");
 
             if token_iterator.peek().is_some() {
                 let Some(TokenTree::Punct(punct)) = token_iterator.next() else {
@@ -817,11 +843,7 @@ impl State {
 
             let encodings = Self::parse_instruction_encoding(encoding_group.stream());
 
-            self.instruction_definitions.push(InstructionDefinition {
-                name,
-                encodings,
-                body: body_group.stream(),
-            });
+            self.instruction_definitions.push(InstructionDefinition { name, encodings, body });
         }
     }
 
@@ -953,7 +975,7 @@ impl State {
                         .map(|_| SingleEncoding {
                             name: definition.name.clone(),
                             encoding,
-                            body: &definition.body,
+                            body: definition.body.as_ref(),
                             has_multiple_encodings: definition.encodings.len() > 1,
                         })
                         .ok()
@@ -1081,9 +1103,21 @@ impl State {
                 } else if let Some(instruction) = found_instruction {
                     debug!("    {i:#x}: {instruction}");
 
-                    let body = instruction.body;
+                    let body = match instruction.body {
+                        Some(body) => body,
+                        None => self.unimplemented_instruction_handler.as_ref().unwrap(),
+                    };
                     let mut parameters = quote! {};
                     let mut immediates_index = 0;
+                    let instruction_as_string = instruction.to_string();
+                    let trace_call = if self.should_trace_instructions {
+                        quote! {
+                            use log::trace;
+                            trace!("{instruction_as_string}");
+                        }
+                    } else {
+                        quote! {}
+                    };
 
                     for (name, addressing_method) in &instruction.encoding.parameters {
                         let name_identifier = proc_macro2::Ident::new(name, Span::call_site());
@@ -1099,7 +1133,9 @@ impl State {
                     let tokens = if immediates_before_opcode {
                         quote! {
                             std::boxed::Box::new(|cpu_state, immediate_bytes| {
+                                let instruction_as_string = #instruction_as_string;
                                 #parameters
+                                #trace_call
                                 #body
                             }),
                         }
@@ -1120,8 +1156,10 @@ impl State {
 
                         quote! {
                             std::boxed::Box::new(|cpu_state| {
+                                let instruction_as_string = #instruction_as_string;
                                 #immediate_bytes
                                 #parameters
+                                #trace_call
                                 #body
                             }),
                         }

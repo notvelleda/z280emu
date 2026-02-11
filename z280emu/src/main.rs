@@ -94,7 +94,7 @@ fn main() {
     };
     let mut cpu_state = CPUState::new(bus_accessor);
 
-    for _i in 0..5 {
+    for _i in 0..16 {
         decoder.decode_instruction(&mut cpu_state);
     }
 }

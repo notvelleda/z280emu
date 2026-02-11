@@ -517,7 +517,7 @@ decode_instructions! {
             // IM
             "11_100_110", src: imm8(),
         ] => unimplemented,
-        "BIT": ["01_***_***" (CBPrefix), b: imm_signed(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "CALL": [
             // conditional call
             "11_***_100", cc: cc(3..6), addr: call_addr(),
@@ -533,8 +533,7 @@ decode_instructions! {
         ] => unimplemented,
         "CPD": ["10_101_001" (EDPrefix)] => unimplemented,
         "CPDR": ["10_111_001" (EDPrefix)] => unimplemented,
-        // CPI
-        ["10_100_001" (EDPrefix)] => unimplemented,
+        "CPI": ["10_100_001" (EDPrefix)] => unimplemented,
         "CPIR": ["10_110_001" (EDPrefix)] => unimplemented,
         "CPL": ["00_101_111"] => unimplemented,
         "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
@@ -769,20 +768,20 @@ decode_instructions! {
         "RETIL": ["01_010_101" (EDPrefix)] => unimplemented,
         "RETN": ["01_000_101" (EDPrefix)] => unimplemented,
         "RL": [
-            "00_010_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
+            "00_010_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
             "00_010_111", dst: Register::A,
         ] => unimplemented,
         "RLC": [
-            "00_000_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
+            "00_000_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
             "00_000_111", dst: Register::A,
         ] => unimplemented,
         "RLD": ["01_101_111" (EDPrefix)] => unimplemented,
         "RR": [
-            "00_011_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
+            "00_011_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
             "00_011_111", dst: Register::A,
         ] => unimplemented,
         "RRC": [
-            "00_001_***" (CBPrefix), dst: r(3..6) | hl_indirection(3..6),
+            "00_001_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
             "00_001_111", dst: Register::A,
         ] => unimplemented,
         "RRD": ["01_100_111" (EDPrefix)] => unimplemented,

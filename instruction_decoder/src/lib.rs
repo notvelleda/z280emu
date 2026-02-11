@@ -797,7 +797,7 @@ impl State {
         }
 
         if methods.len() != 1 {
-            return AddressingMethod::List(methods);
+            AddressingMethod::List(methods)
         } else {
             // this should just be methods[0] but rust is silly
             methods.into_iter().next().unwrap()
@@ -834,7 +834,7 @@ impl State {
 
             let body = match token_iterator.next() {
                 Some(TokenTree::Group(body_group)) if body_group.delimiter() == Delimiter::Brace => Some(body_group.stream()),
-                Some(TokenTree::Ident(identifier)) if identifier.to_string() == "unimplemented" => None,
+                Some(TokenTree::Ident(identifier)) if identifier == "unimplemented" => None,
                 _ => panic!("expected brace-delimited group or \"unimplemented\""),
             };
 

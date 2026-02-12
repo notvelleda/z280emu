@@ -1,7 +1,7 @@
 pub mod instruction_decoding;
 pub mod registers;
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use instruction_decoding::{Memory, Register, RegisterOrMemoryAccessor};
 use log::info;
@@ -52,17 +52,23 @@ impl BusAccessor for SimpleBusAccessor {
     fn read(&self, address_space: BusAddressSpace, address: u32, data: &mut [u8]) {
         match address_space {
             BusAddressSpace::Memory => data.copy_from_slice(&self.memory[address as usize..address as usize + data.len()]),
-            BusAddressSpace::IO => {
-                info!("read {} bytes from IO at address {address:#x}", data.len());
-                data.fill(0);
-            }
+            BusAddressSpace::IO => match address & 0xff {
+                1 => {
+                    let _ = std::io::stdout().flush();
+                    std::io::stdin().read_exact(data).unwrap();
+                }
+                _ => {
+                    info!("read {} bytes from IO at address {address:#x}", data.len());
+                    data.fill(0);
+                }
+            },
         }
     }
 
     fn write(&mut self, address_space: BusAddressSpace, address: u32, data: &[u8]) {
         match address_space {
             BusAddressSpace::Memory => self.memory[address as usize..address as usize + data.len()].copy_from_slice(data),
-            BusAddressSpace::IO => match address {
+            BusAddressSpace::IO => match address & 0xff {
                 1 => std::io::stdout().write_all(data).unwrap(),
                 _ => info!("wrote to IO at address {address:#x} with data {data:?}"),
             },
@@ -106,9 +112,9 @@ pub fn pop<T: BusAccessor>(cpu_state: &mut CPUState<T>) -> u16 {
     Memory { address: sp }.get(cpu_state)
 }
 
-pub fn calculate_io_address<T: BusAccessor>(cpu_state: &mut CPUState<T>, low_byte: u8) -> u32 {
-    let b_register: u8 = Register::B.get(cpu_state);
-    (low_byte as u32) | ((b_register as u32) << 8) | ((cpu_state.system_status_registers.io_page as u32) << 16)
+pub fn calculate_io_address<T: BusAccessor>(cpu_state: &mut CPUState<T>, low_byte: u8, middle_byte: Register) -> u32 {
+    let middle_byte: u8 = middle_byte.get(cpu_state);
+    (low_byte as u32) | ((middle_byte as u32) << 8) | ((cpu_state.system_status_registers.io_page as u32) << 16)
 }
 
 fn main() {

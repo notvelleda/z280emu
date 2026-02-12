@@ -43,14 +43,14 @@ impl RegisterOrMemoryAccessor<u8> for Register {
             Self::C => cpu_state.register_file.current_x_bank().c,
             Self::D => cpu_state.register_file.current_x_bank().d,
             Self::E => cpu_state.register_file.current_x_bank().e,
-            Self::H => (cpu_state.register_file.current_x_bank().hl & 0xff) as u8,
-            Self::L => (cpu_state.register_file.current_x_bank().hl >> 8) as u8,
+            Self::H => (cpu_state.register_file.current_x_bank().hl >> 8) as u8,
+            Self::L => (cpu_state.register_file.current_x_bank().hl & 0xff) as u8,
             Self::I => cpu_state.register_file.i,
             Self::R => cpu_state.register_file.r,
-            Self::IXH => (cpu_state.register_file.ix & 0xff) as u8,
-            Self::IXL => (cpu_state.register_file.ix >> 8) as u8,
-            Self::IYH => (cpu_state.register_file.iy & 0xff) as u8,
-            Self::IYL => (cpu_state.register_file.iy >> 8) as u8,
+            Self::IXH => (cpu_state.register_file.ix >> 8) as u8,
+            Self::IXL => (cpu_state.register_file.ix & 0xff) as u8,
+            Self::IYH => (cpu_state.register_file.iy >> 8) as u8,
+            Self::IYL => (cpu_state.register_file.iy & 0xff) as u8,
             _ => {
                 let value: u16 = self.get(cpu_state);
                 value as u8
@@ -221,6 +221,26 @@ pub enum Immediate {
     Word(u16),
     UnknownSigned(isize),
     UnknownUnsigned(usize),
+}
+
+impl Immediate {
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Byte(value) => *value == 0,
+            Self::Word(value) => *value == 0,
+            Self::UnknownSigned(value) => *value == 0,
+            Self::UnknownUnsigned(value) => *value == 0,
+        }
+    }
+
+    pub fn is_non_zero(&self) -> bool {
+        match self {
+            Self::Byte(value) => *value != 0,
+            Self::Word(value) => *value != 0,
+            Self::UnknownSigned(value) => *value != 0,
+            Self::UnknownUnsigned(value) => *value != 0,
+        }
+    }
 }
 
 impl RegisterOrMemoryAccessor<u8> for Immediate {
@@ -528,28 +548,109 @@ decode_instructions! {
         },
     },
     instructions: {
-        "ADC (byte form)": [
+        "ADD/ADC (byte form)": [
+            // ADC
             // R, RX, IR, DA, X, SX, RA, SR, BX
-            "10_001_***", src: src_dst(0..3),
+            "10_001_***", src: src_dst(0..3), use_carry: const(1),
             // IM
-            "11_001_110", src: imm8(),
-        ] => unimplemented,
-        "ADC (word form)": ["01_**1_010" (EDPrefix), src: rr(4..6), dst: hl()] => unimplemented,
-        "ADD": ["01_101_101" (EDPrefix), dst: hl()] => unimplemented,
-        "ADD (byte form)": [
+            "11_001_110", src: imm8(), use_carry: const(1),
+
+            // ADD
             // R, RX, IR, DA, X, SX, RA, SR, BX
-            "10_000_***", src: src_dst(0..3),
+            "10_000_***", src: src_dst(0..3), use_carry: const(0),
             // IM
-            "11_000_110", src: imm8(),
-        ] => unimplemented,
-        "ADD (word form)": ["00_**1_001", src: rr(4..6), dst: hl()] => unimplemented,
-        "ADDW": ["11_**0_110" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+            "11_000_110", src: imm8(), use_carry: const(0),
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            let result_checked = if use_carry.is_non_zero() {
+                a.checked_add(src).and_then(|result| result.checked_add(if flags.carry() { 1 } else { 0 }))
+            } else {
+                a.checked_add(src)
+            };
+            let (result, carry) = a.carrying_add(src, use_carry.is_non_zero() && flags.carry());
+
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(a, src));
+            flags.set_parity_overflow(result_checked.is_none());
+            flags.set_add_subtract(false);
+            flags.set_carry(carry);
+
+            Register::A.set(cpu_state, result);
+        },
+        "ADD/ADC (word form)": [
+            // ADC
+            "01_**1_010" (EDPrefix), src: rr(4..6), dst: hl(), use_carry: const(1), set_flags: const(1),
+            // ADD
+            "00_**1_001", src: rr(4..6), dst: hl(), use_carry: const(0), set_flags: const(0),
+            // ADDW
+            "11_**0_110" (EDPrefix), src: rr_expanded(4..6), dst: Register::HL, use_carry: const(0), set_flags: const(1),
+        ] => {
+            let dst_value: u16 = dst.get(cpu_state);
+            let src: u16 = src.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            let (result, carry) = dst_value.carrying_add(src, use_carry.is_non_zero() && flags.carry());
+
+            if set_flags.is_non_zero() {
+                let result_checked = if use_carry.is_non_zero() {
+                    dst_value.checked_add(src).and_then(|result| result.checked_add(if flags.carry() { 1 } else { 0 }))
+                } else {
+                    dst_value.checked_add(src)
+                };
+
+                flags.set_sign((result & 0x8000) != 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(result_checked.is_none());
+            }
+
+            flags.set_half_carry(super::calculate_half_carry_u16(dst_value, src));
+            flags.set_add_subtract(false);
+            flags.set_carry(carry);
+
+            dst.set(cpu_state, result);
+        },
+        "ADD": ["01_101_101" (EDPrefix), dst: hl(), src: Register::A] => {
+            let dst_value: u16 = dst.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+            let src = src as i8 as i16 as u16;
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            let result_checked = dst_value.checked_add(src);
+            let (result, carry) = dst_value.carrying_add(src, false);
+
+            flags.set_sign((result & 0x8000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(super::calculate_half_carry_u16(dst_value, src));
+            flags.set_parity_overflow(result_checked.is_none());
+            flags.set_add_subtract(false);
+            flags.set_carry(carry);
+
+            dst.set(cpu_state, result);
+        },
         "AND": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_100_***", src: src_dst(0..3),
             // IM
             "11_100_110", src: imm8(),
-        ] => unimplemented,
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+            let result = a & src;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(true);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            flags.set_add_subtract(false);
+            flags.set_carry(false);
+
+            Register::A.set(cpu_state, result);
+        },
         "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "CALL": [
             // conditional call
@@ -573,7 +674,7 @@ decode_instructions! {
             let a: u8 = Register::A.get(cpu_state);
             let src: u8 = src.get(cpu_state);
             let result_checked = a.checked_sub(src);
-            let result = a.wrapping_sub(src);
+            let (result, borrow) = a.borrowing_sub(src, false);
 
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
@@ -581,7 +682,7 @@ decode_instructions! {
             flags.set_half_carry(super::calculate_half_carry_u8(a, (-(src as i8)) as u8));
             flags.set_parity_overflow(result_checked.is_none());
             flags.set_add_subtract(true);
-            flags.set_carry(super::calculate_carry_u8(a, (-(src as i8)) as u8));
+            flags.set_carry(borrow);
         },
         "CPD": ["10_101_001" (EDPrefix)] => unimplemented,
         "CPDR": ["10_111_001" (EDPrefix)] => unimplemented,
@@ -589,7 +690,35 @@ decode_instructions! {
         "CPIR": ["10_110_001" (EDPrefix)] => unimplemented,
         "CPL": ["00_101_111"] => unimplemented,
         "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
-        "DAA": ["00_100_111"] => unimplemented,
+        "DAA": ["00_100_111"] => {
+            let a_value: u8 = Register::A.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            let mut correction_factor = 0;
+
+            // https://worldofspectrum.org/faq/reference/z80reference.htm#DAA
+
+            if a_value & 0x0f > 9 || flags.half_carry() {
+                correction_factor |= 0x06;
+            }
+
+            if a_value > 0x99 || flags.carry() {
+                correction_factor |= 0x60;
+                flags.set_carry(true);
+            }
+
+            if flags.add_subtract() {
+                correction_factor = (-(correction_factor as i8)) as u8;
+            }
+
+            let result = a_value.wrapping_add(correction_factor);
+
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(a_value, correction_factor));
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+
+            Register::A.set(cpu_state, result);
+        },
         "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => {
             let value: u8 = dst.get(cpu_state);
             let result = value.checked_sub(1);
@@ -792,7 +921,7 @@ decode_instructions! {
             // X, RA, SR, BX
             "00_***_010" (EDPrefix), src: lda_extended(3..6), dst: hl(),
         ] => {
-            dst.set(cpu_state, u16::try_from(src.address).unwrap());
+            dst.set(cpu_state, src.address);
         },
         "LDCTL": [
             "01_100_110" (EDPrefix), src: Register::C, dst: hl(),
@@ -875,22 +1004,90 @@ decode_instructions! {
         "RETIL": ["01_010_101" (EDPrefix)] => unimplemented,
         "RETN": ["01_000_101" (EDPrefix)] => unimplemented,
         "RL": [
-            "00_010_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
-            "00_010_111", dst: Register::A,
-        ] => unimplemented,
+            "00_010_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3), set_flags: const(1),
+            "00_010_111", dst: Register::A, set_flags: const(0),
+        ] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            let result = (dst_value << 1) | if flags.carry() { 1 } else { 0 };
+
+            if set_flags.is_non_zero() {
+                flags.set_sign((result & 0b1000_0000) != 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            }
+
+            flags.set_half_carry(false);
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 0x80 != 0);
+
+            dst.set(cpu_state, result);
+        },
         "RLC": [
-            "00_000_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
-            "00_000_111", dst: Register::A,
-        ] => unimplemented,
+            "00_000_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3), set_flags: const(1),
+            "00_000_111", dst: Register::A, set_flags: const(0),
+        ] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let result = (dst_value << 1) | ((dst_value & 0x80) >> 7);
+
+            dst.set(cpu_state, result);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            if set_flags.is_non_zero() {
+                flags.set_sign((result & 0b1000_0000) != 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            }
+
+            flags.set_half_carry(false);
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 0x80 != 0);
+        },
         "RLD": ["01_101_111" (EDPrefix)] => unimplemented,
         "RR": [
-            "00_011_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
-            "00_011_111", dst: Register::A,
-        ] => unimplemented,
+            "00_011_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3), set_flags: const(1),
+            "00_011_111", dst: Register::A, set_flags: const(0),
+        ] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            let result = (dst_value >> 1) | if flags.carry() { 0x80 } else { 0 };
+
+            if set_flags.is_non_zero() {
+                flags.set_sign((result & 0b1000_0000) != 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            }
+
+            flags.set_half_carry(false);
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 1 != 0);
+
+            dst.set(cpu_state, result);
+        },
         "RRC": [
-            "00_001_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3),
-            "00_001_111", dst: Register::A,
-        ] => unimplemented,
+            "00_001_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3), set_flags: const(1),
+            "00_001_111", dst: Register::A, set_flags: const(0),
+        ] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let result = (dst_value >> 1) | ((dst_value & 1) << 7);
+
+            dst.set(cpu_state, result);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            if set_flags.is_non_zero() {
+                flags.set_sign((result & 0b1000_0000) != 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            }
+
+            flags.set_half_carry(false);
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 1 != 0);
+        },
         "RRD": ["01_100_111" (EDPrefix)] => unimplemented,
         "RST": ["11_***_111", addr: t_encoding(3..6)] => unimplemented,
         "SBC (byte form)": [

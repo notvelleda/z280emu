@@ -23,6 +23,7 @@ pub enum Register {
     IXL,
     IYH,
     IYL,
+    AF,
     BC,
     DE,
     HL,
@@ -99,6 +100,10 @@ impl RegisterOrMemoryAccessor<u8> for Register {
 impl RegisterOrMemoryAccessor<u16> for Register {
     fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u16 {
         match self {
+            Self::AF => {
+                let partial_file = cpu_state.register_file.current_af_bank();
+                ((partial_file.a as u16) << 8) | (partial_file.f.into_bits() as u16)
+            }
             Self::BC => {
                 let partial_file = cpu_state.register_file.current_x_bank();
                 ((partial_file.b as u16) << 8) | (partial_file.c as u16)
@@ -121,6 +126,12 @@ impl RegisterOrMemoryAccessor<u16> for Register {
 
     fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) {
         match self {
+            Self::AF => {
+                let partial_file = cpu_state.register_file.current_af_bank_mut();
+                partial_file.a = (value >> 8) as u8;
+                partial_file.f.set_bits((value & 0xff) as u8);
+                // TODO: how should unused bits be set here?
+            }
             Self::BC => {
                 let partial_file = cpu_state.register_file.current_x_bank_mut();
                 partial_file.b = (value >> 8) as u8;
@@ -173,20 +184,20 @@ impl RegisterOrMemoryAccessor<i16> for Register {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Memory {
-    address: u32,
+    pub address: u16,
 }
 
 impl RegisterOrMemoryAccessor<u8> for Memory {
     fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u8 {
         let mut result = [0];
 
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, self.address, &mut result);
+        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
 
         result[0]
     }
 
     fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u8) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, self.address, &[value]);
+        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &[value]);
     }
 }
 
@@ -194,13 +205,13 @@ impl RegisterOrMemoryAccessor<u16> for Memory {
     fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u16 {
         let mut result = [0; 2];
 
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, self.address, &mut result);
+        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
 
         u16::from_le_bytes(result)
     }
 
     fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, self.address, &value.to_le_bytes());
+        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &value.to_le_bytes());
     }
 }
 
@@ -274,7 +285,7 @@ impl RegisterOrMemoryAccessor<i16> for Immediate {
 
 fn indirect<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, lhs: impl RegisterOrMemoryAccessor<u16>, rhs: impl RegisterOrMemoryAccessor<i16>) -> Memory {
     Memory {
-        address: lhs.get(cpu_state).wrapping_add_signed(rhs.get(cpu_state)) as u32,
+        address: lhs.get(cpu_state).wrapping_add_signed(rhs.get(cpu_state)),
     }
 }
 
@@ -420,6 +431,18 @@ decode_instructions! {
             0b10 => Register::HL,
             0b11 => Register::SP,
         },
+        rr_stack_ops: {
+            0b00 => Register::BC,
+            0b01 => Register::DE,
+            IXOverride => {
+                0b10 => Register::IX,
+            },
+            IYOverride => {
+                0b10 => Register::IY,
+            },
+            0b10 => Register::HL,
+            0b11 => Register::AF,
+        },
         rr_ix_expansion: {
             IXOverride => {
                 0b00 => indirect(Register::HL),
@@ -481,7 +504,7 @@ decode_instructions! {
             IYOverride => {
                 indirect(Register::PC + imm16())
             },
-            imm16(),
+            indirect(imm16()),
         },
         lda_extended: {
             0b000 => indirect(Register::SP + imm16()),
@@ -530,17 +553,36 @@ decode_instructions! {
         "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "CALL": [
             // conditional call
-            "11_***_100", cc: cc(3..6), addr: call_addr(),
+            "11_***_100", cc: cc(3..6), target: call_addr(),
             // unconditional call
-            "11_001_101", cc: ConditionCode::Always, addr: call_addr(),
-        ] => unimplemented,
+            "11_001_101", cc: ConditionCode::Always, target: call_addr(),
+        ] => {
+            if cc.is_condition_met(cpu_state) {
+                let pc = Register::PC.get(cpu_state);
+                super::push(cpu_state, pc);
+                Register::PC.set(cpu_state, target.address);
+            }
+        },
         "CCF": ["00_111_111"] => unimplemented,
         "CP": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_111_***", src: src_dst(0..3),
             // IM
             "11_111_110", src: imm8(),
-        ] => unimplemented,
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+            let result_checked = a.checked_sub(src);
+            let result = a.wrapping_sub(src);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(a, (-(src as i8)) as u8));
+            flags.set_parity_overflow(result_checked.is_none());
+            flags.set_add_subtract(true);
+            flags.set_carry(super::calculate_carry_u8(a, (-(src as i8)) as u8));
+        },
         "CPD": ["10_101_001" (EDPrefix)] => unimplemented,
         "CPDR": ["10_111_001" (EDPrefix)] => unimplemented,
         "CPI": ["10_100_001" (EDPrefix)] => unimplemented,
@@ -550,18 +592,21 @@ decode_instructions! {
         "DAA": ["00_100_111"] => unimplemented,
         "DEC (byte form)": ["00_***_101", dst: src_dst(3..6)] => {
             let value: u8 = dst.get(cpu_state);
-            let result = (value as i8).checked_sub(1);
+            let result = value.checked_sub(1);
 
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
-            flags.set_sign(result.unwrap_or_default() < 0);
+            flags.set_sign((result.unwrap_or_default() & 0b1000_0000) != 0);
             flags.set_zero(result.unwrap_or_default() == 0);
-            flags.set_half_carry((value as i8 ^ (-1) ^ result.unwrap_or_default()) & 0x10 != 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(value, -1_i8 as u8));
             flags.set_parity_overflow(result.is_none());
             flags.set_add_subtract(true);
 
-            dst.set(cpu_state, result.unwrap_or_default() as u8);
+            dst.set(cpu_state, result.unwrap_or_default());
         },
-        "DEC (word form)": ["00_**1_011", dst: rr_expanded(4..6)] => unimplemented,
+        "DEC (word form)": ["00_**1_011", dst: rr_expanded(4..6)] => {
+            let value: u16 = dst.get(cpu_state);
+            dst.set(cpu_state, value.wrapping_sub(1));
+        },
         "DI": [
             "11_110_011", mask: const(0x7f),
             "01_110_111" (EDPrefix), mask: imm8(),
@@ -595,7 +640,10 @@ decode_instructions! {
         "EXTS (byte form)": ["10_100_100" (EDPrefix)] => unimplemented,
         "EXTS (word form)": ["10_101_100" (EDPrefix)] => unimplemented,
         "EXX": ["11_011_001"] => unimplemented,
-        "HALT": ["01_110_110"] => unimplemented,
+        "HALT": ["01_110_110"] => {
+            // TODO: handle this properly, this isn't even remotely correct
+            std::process::exit(0);
+        },
         "IM": [
             "01_000_110" (EDPrefix), p: InterruptMode::Mode0,
             "01_010_110" (EDPrefix), p: InterruptMode::Mode1,
@@ -613,7 +661,7 @@ decode_instructions! {
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result.unwrap_or_default() & 0b1000_0000) != 0);
             flags.set_zero(result.unwrap_or_default() == 0);
-            flags.set_half_carry((value ^ 1 ^ result.unwrap_or_default()) & 0x10 != 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(value, 1));
             flags.set_parity_overflow(result.is_none());
             flags.set_add_subtract(false);
 
@@ -778,7 +826,7 @@ decode_instructions! {
             "01_000_100" (EDPrefix), register: Register::A,
             "01_001_100" (EDPrefix), register: Register::HL,
         ] => unimplemented,
-        "NOP": ["00_000_000"] => unimplemented,
+        "NOP": ["00_000_000"] => {},
         "OR": ["10_110_***", src: src_dst(0..3)] => unimplemented,
         "OTDR": ["10_111_011" (EDPrefix)] => unimplemented,
         "OTDRW": ["10_011_011" (EDPrefix)] => unimplemented,
@@ -787,25 +835,42 @@ decode_instructions! {
         "OUT": [
             "01_***_001" (EDPrefix), src: r(3..6) | ix_iy_components(3..6) | extended_indirect_modes(3..6), dst: Register::C,
             "11_010_011", src: Register::A, dst: imm8(),
-        ] => unimplemented,
+        ] => {
+            let addr: u8 = dst.get(cpu_state);
+            let value: u8 = src.get(cpu_state);
+            let full_addr = super::calculate_io_address(cpu_state, addr);
+
+            cpu_state.bus_accessor.write(crate::BusAddressSpace::IO, full_addr, &[value]);
+        },
         "OUTD": ["10_101_011" (EDPrefix)] => unimplemented,
         "OUTDW": ["10_001_011" (EDPrefix)] => unimplemented,
         "OUTI": ["10_100_011" (EDPrefix)] => unimplemented,
         "OUTIW": ["10_000_011" (EDPrefix)] => unimplemented,
         "OUT HL": ["10_111_111" (EDPrefix)] => unimplemented,
         "PCACHE": ["01_100_101" (EDPrefix)] => unimplemented,
-        "POP": ["11_**0_001", dst: rr(4..6) | rr_ix_expansion(4..6)] => unimplemented,
+        "POP": ["11_**0_001", dst: rr_stack_ops(4..6) | rr_ix_expansion(4..6)] => {
+            let value = super::pop(cpu_state);
+            dst.set(cpu_state, value);
+        },
         "PUSH": [
             // R, IR, DA, RA
-            "11_**0_101", src: rr(4..6) | rr_ix_expansion(4..6),
+            "11_**0_101", src: rr_stack_ops(4..6) | rr_ix_expansion(4..6),
             // IM
             "11_110_101" (IYOverride), src: imm16(),
-        ] => unimplemented,
+        ] => {
+            let value = src.get(cpu_state);
+            super::push(cpu_state, value);
+        },
         "RES": ["10_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
         "RET": [
             "11_***_000", cc: cc(3..6),
             "11_001_001", cc: ConditionCode::Always,
-        ] => unimplemented,
+        ] => {
+            if cc.is_condition_met(cpu_state) {
+                let new_pc = super::pop(cpu_state);
+                Register::PC.set(cpu_state, new_pc);
+            }
+        },
         "RETI": ["01_001_101" (EDPrefix)] => unimplemented,
         "RETIL": ["01_010_101" (EDPrefix)] => unimplemented,
         "RETN": ["01_000_101" (EDPrefix)] => unimplemented,

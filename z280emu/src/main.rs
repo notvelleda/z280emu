@@ -1,7 +1,10 @@
-use log::{debug, info};
-
 pub mod instruction_decoding;
 pub mod registers;
+
+use std::io::Write;
+
+use log::info;
+use instruction_decoding::{Memory, Register, RegisterOrMemoryAccessor};
 
 pub struct CPUState<T: BusAccessor + 'static> {
     pub register_file: registers::RegisterFile,
@@ -59,7 +62,12 @@ impl BusAccessor for SimpleBusAccessor {
     fn write(&mut self, address_space: BusAddressSpace, address: u32, data: &[u8]) {
         match address_space {
             BusAddressSpace::Memory => self.memory[address as usize..address as usize + data.len()].copy_from_slice(data),
-            BusAddressSpace::IO => info!("wrote to IO at address {address:#x} with data {data:?}"),
+            BusAddressSpace::IO => {
+                match address {
+                    1 => std::io::stdout().write_all(data).unwrap(),
+                    _ => info!("wrote to IO at address {address:#x} with data {data:?}"),
+                }
+            },
         }
     }
 }
@@ -75,6 +83,45 @@ pub fn calculate_parity(mut value: u16) -> bool {
     parity
 }
 
+pub fn calculate_half_carry_u8(lhs: u8, rhs: u8) -> bool {
+    (lhs ^ rhs ^ (lhs.wrapping_add(rhs))) & 0x10 != 0
+}
+
+pub fn calculate_half_carry_u16(lhs: u16, rhs: u16) -> bool {
+    (lhs ^ rhs ^ (lhs.wrapping_add(rhs))) & 0x0100 != 0
+}
+
+// is this correct?
+pub fn calculate_carry_u8(lhs: u8, rhs: u8) -> bool {
+    (lhs ^ rhs ^ (lhs.wrapping_add(rhs))) & 0x80 != 0
+}
+
+pub fn calculate_carry_u16(lhs: u16, rhs: u16) -> bool {
+    (lhs ^ rhs ^ (lhs.wrapping_add(rhs))) & 0x8000 != 0
+}
+
+// TODO: system stack overflow warning trap
+pub fn push<T: BusAccessor>(cpu_state: &mut CPUState<T>, value: u16) {
+    let sp: u16 = Register::SP.get(cpu_state);
+    let sp = sp.wrapping_sub(2);
+    Register::SP.set(cpu_state, sp);
+
+    Memory { address: sp }.set(cpu_state, value);
+}
+
+pub fn pop<T: BusAccessor>(cpu_state: &mut CPUState<T>) -> u16 {
+    let sp: u16 = Register::SP.get(cpu_state);
+    let new_sp = sp.wrapping_add(2);
+    Register::SP.set(cpu_state, new_sp);
+
+    Memory { address: sp }.get(cpu_state)
+}
+
+pub fn calculate_io_address<T: BusAccessor>(cpu_state: &mut CPUState<T>, low_byte: u8) -> u32 {
+    let b_register: u8 = Register::B.get(cpu_state);
+    (low_byte as u32) | ((b_register as u32) << 8) | ((cpu_state.system_status_registers.io_page as u32) << 16)
+}
+
 fn main() {
     env_logger::init();
 
@@ -82,31 +129,58 @@ fn main() {
     let decoder = instruction_decoding::InstructionDecoder::default();
     info!("initialized tables in {:?}", time.elapsed());
 
+    // adapted from https://github.com/skx/z80-examples/blob/03ef9c1a77a2ee9429b6877bfb990d11e5c1acf0/string-output.z80
+    let program = [
+        // CALL 0010H
+        0b11_001_101,
+        16,
+        0,
+        // Hellorld!\r\n
+        b'H',
+        b'e',
+        b'l',
+        b'l',
+        b'o',
+        b'r',
+        b'l',
+        b'd',
+        b'!',
+        b'\r',
+        b'\n',
+        0,
+        // HALT
+        0b01_110_110,
+        // POP HL
+        0b11_100_001,
+        // LD A, (HL)
+        0b01_111_110,
+        // INC HL
+        0b00_100_011,
+        // PUSH HL
+        0b11_100_101,
+        // CP A, 0
+        0b11_111_110,
+        0,
+        // RET Z
+        0b11_001_000,
+        // OUT (1), A
+        0b11_010_011,
+        1,
+        // JP 0010H
+        0b11_000_011,
+        16,
+        0,
+    ];
+
     let bus_accessor = SimpleBusAccessor {
-        memory: vec![
-            // ld hl, output
-            0b00_100_001,
-            9,
-            0,
-            // xor a, a
-            0b10_101_111,
-            // inc a
-            0b00_111_100,
-            // ld (hl), a
-            0b01_110_111,
-            // jp loop
-            0b11_000_011,
-            4,
-            0,
-            // output
-            0,
-        ]
-        .into_boxed_slice(),
+        memory: vec![0; 65536].into_boxed_slice(),
     };
     let mut cpu_state = CPUState::new(bus_accessor);
 
-    for _i in 0..16 {
+    cpu_state.bus_accessor.memory[..program.len()].clone_from_slice(&program);
+    *cpu_state.register_file.current_stack_pointer_mut() = 0xffff;
+
+    loop {
         decoder.decode_instruction(&mut cpu_state);
-        debug!("output byte is {}", cpu_state.bus_accessor.memory[9]);
     }
 }

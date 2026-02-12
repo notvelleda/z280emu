@@ -168,6 +168,10 @@ enum AddressingMethod {
         #[derivative(Hash = "ignore")]
         stream: TokenStream,
     },
+    Direct {
+        lhs: Box<AddressingMethod>,
+        rhs: Option<Box<AddressingMethod>>,
+    },
     Indirect {
         lhs: Box<AddressingMethod>,
         rhs: Option<Box<AddressingMethod>>,
@@ -189,7 +193,7 @@ impl AddressingMethod {
     fn is_dynamic(&self) -> bool {
         match self {
             Self::Decode { .. } => true,
-            Self::Indirect { lhs, rhs } => [lhs].into_iter().chain(rhs.iter()).any(|method| method.is_dynamic()),
+            Self::Direct { lhs, rhs } | Self::Indirect { lhs, rhs } => [lhs].into_iter().chain(rhs.iter()).any(|method| method.is_dynamic()),
             Self::List(list) => list.iter().any(AddressingMethod::is_dynamic),
             _ => false,
         }
@@ -197,7 +201,7 @@ impl AddressingMethod {
 
     fn immediate_size(&self) -> Option<usize> {
         match self {
-            Self::Indirect { lhs, rhs } => {
+            Self::Direct { lhs, rhs } | Self::Indirect { lhs, rhs } => {
                 let result = lhs.immediate_size().unwrap_or_default() + rhs.as_ref().and_then(|rhs| rhs.immediate_size()).unwrap_or_default();
 
                 if result == 0 { None } else { Some(result) }
@@ -211,6 +215,11 @@ impl AddressingMethod {
     fn build_tokens(&self, immediates_index: &mut usize) -> TokenStream {
         match self {
             Self::Arbitrary { stream, .. } => stream.clone(),
+            Self::Direct { lhs, rhs } => {
+                let lhs_tokens = lhs.build_tokens(immediates_index);
+                let rhs_tokens = rhs.as_ref().map(|rhs| rhs.build_tokens(immediates_index)).unwrap_or_else(|| quote! { Immediate::UnknownUnsigned(0) });
+                quote! { direct(cpu_state, #lhs_tokens, #rhs_tokens) }
+            }
             Self::Indirect { lhs, rhs } => {
                 let lhs_tokens = lhs.build_tokens(immediates_index);
                 let rhs_tokens = rhs.as_ref().map(|rhs| rhs.build_tokens(immediates_index)).unwrap_or_else(|| quote! { Immediate::UnknownUnsigned(0) });
@@ -237,6 +246,15 @@ impl Display for AddressingMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Arbitrary { string_representation: value, .. } => write!(f, "{value}"),
+            Self::Direct { lhs, rhs } => {
+                write!(f, "direct({lhs}")?;
+
+                if let Some(rhs) = &rhs {
+                    write!(f, " + {rhs}")?;
+                }
+
+                write!(f, ")")
+            }
             Self::Indirect { lhs, rhs } => {
                 write!(f, "indirect({lhs}")?;
 
@@ -720,6 +738,25 @@ impl State {
         let first_method = match identifier.to_string().as_str() {
             "imm8" => AddressingMethod::Immediate8Bit,
             "imm16" => AddressingMethod::Immediate16Bit,
+            "direct" => {
+                let mut group_token_iterator = arguments_group.stream().into_iter().peekable();
+                let lhs = Self::parse_addressing_method(&mut group_token_iterator).expect("expected addressing method");
+                let rhs = group_token_iterator
+                    .next()
+                    .and_then(|token| {
+                        if let TokenTree::Punct(punct) = token
+                            && punct.spacing() == Spacing::Alone
+                            && punct.as_char() == '+'
+                        {
+                            Self::parse_addressing_method(&mut group_token_iterator)
+                        } else {
+                            panic!("expected \"+\"");
+                        }
+                    })
+                    .map(Box::new);
+
+                AddressingMethod::Direct { lhs: Box::new(lhs), rhs }
+            }
             "indirect" => {
                 let mut group_token_iterator = arguments_group.stream().into_iter().peekable();
                 let lhs = Self::parse_addressing_method(&mut group_token_iterator).expect("expected addressing method");

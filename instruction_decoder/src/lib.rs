@@ -306,7 +306,7 @@ impl Display for SingleEncoding<'_> {
             }
         }
 
-        if !self.encoding.parameters.is_empty() {
+        if !self.encoding.parameters.is_empty() && !f.alternate() {
             write!(
                 f,
                 ", {}",
@@ -1114,9 +1114,17 @@ impl State {
                     let mut immediates_index = 0;
                     let instruction_as_string = instruction.to_string();
                     let trace_call = if self.should_trace_instructions {
+                        let mut formatting_string = format!("{instruction:#}");
+
+                        for (name, _) in &instruction.encoding.parameters {
+                            formatting_string.push_str(&format!(", {name}: {{{name}:?}}"));
+                        }
+
                         quote! {
-                            use log::trace;
-                            trace!("{instruction_as_string}");
+                            {
+                                use log::trace;
+                                trace!(#formatting_string);
+                            }
                         }
                     } else {
                         quote! {}

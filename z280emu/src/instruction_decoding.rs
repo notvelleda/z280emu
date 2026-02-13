@@ -215,6 +215,34 @@ impl RegisterOrMemoryAccessor<u16> for Memory {
     }
 }
 
+impl RegisterOrMemoryAccessor<i8> for Memory {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i8 {
+        let mut result = [0];
+
+        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
+
+        result[0] as i8
+    }
+
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i8) {
+        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &[value as u8]);
+    }
+}
+
+impl RegisterOrMemoryAccessor<i16> for Memory {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i16 {
+        let mut result = [0; 2];
+
+        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
+
+        i16::from_le_bytes(result)
+    }
+
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i16) {
+        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &value.to_le_bytes());
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Immediate {
     Byte(u8),
@@ -438,6 +466,42 @@ macro_rules! impl_sub {
         flags.set_carry(carry);
 
         $dst.set($cpu_state, result);
+    };
+}
+
+macro_rules! impl_div {
+    ($type: tt, $cpu_state:expr, $lhs:expr, $rhs:expr, $result:expr, $remainder:expr) => {
+        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
+
+        if $rhs == 0 {
+            flags.set_sign(false);
+            flags.set_zero(true);
+            flags.set_parity_overflow(true);
+
+            // TODO: division exception
+            return;
+        }
+
+        let result = $type::try_from($lhs / $rhs);
+
+        match result {
+            Ok(result) => {
+                #[allow(unused_comparisons)] // this just makes things easier
+                flags.set_sign(result < 0);
+                flags.set_zero(result == 0);
+                flags.set_parity_overflow(false);
+
+                $result.set($cpu_state, result);
+                $remainder.set($cpu_state, ($lhs % $rhs) as $type);
+            }
+            Err(_) => {
+                flags.set_sign(false);
+                flags.set_zero(false);
+                flags.set_parity_overflow(true);
+
+                // TODO: division exception
+            }
+        }
     };
 }
 
@@ -693,7 +757,15 @@ decode_instructions! {
 
             Register::A.set(cpu_state, result);
         },
-        "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), r: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
+            let b: u8 = b.get(cpu_state);
+            let dst: u8 = dst.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_zero(dst & (1 << b) == 0);
+            flags.set_half_carry(true);
+            flags.set_add_subtract(false);
+        },
         "CALL": [
             // conditional call
             "11_***_100", cc: cc(3..6), target: call_addr(),
@@ -706,7 +778,10 @@ decode_instructions! {
                 Register::PC.set(cpu_state, target.address);
             }
         },
-        "CCF": ["00_111_111"] => unimplemented,
+        "CCF": ["00_111_111"] => {
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_carry(!flags.carry());
+        },
         "CP": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_111_***", src: src_dst(0..3),
@@ -726,12 +801,57 @@ decode_instructions! {
             flags.set_add_subtract(true);
             flags.set_carry(borrow);
         },
-        "CPD": ["10_101_001" (EDPrefix)] => unimplemented,
-        "CPDR": ["10_111_001" (EDPrefix)] => unimplemented,
-        "CPI": ["10_100_001" (EDPrefix)] => unimplemented,
-        "CPIR": ["10_110_001" (EDPrefix)] => unimplemented,
-        "CPL": ["00_101_111"] => unimplemented,
-        "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        "CPD/CPI": [
+            "10_101_001" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_111_001" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_100_001" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_110_001" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+
+            let (result, half_carry, parity_overflow) = loop {
+                let hl_value = Register::HL.get(cpu_state);
+                let bc_value: u16 = Register::BC.get(cpu_state);
+                let src: u8 = Memory { address: hl_value }.get(cpu_state);
+                let result = a.wrapping_sub(src);
+
+                Register::HL.set(cpu_state, if subtract.is_non_zero() { hl_value.wrapping_sub(1) } else { hl_value.wrapping_add(1) });
+                Register::BC.set(cpu_state, bc_value.wrapping_sub(1));
+
+                if repeat.is_zero() || result == 0 || bc_value == 1 {
+                    break (result, super::calculate_half_carry_u8(a, (-(src as i8)) as u8), bc_value != 1);
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(half_carry);
+            flags.set_parity_overflow(parity_overflow);
+            flags.set_add_subtract(true);
+        },
+        "CPL": ["00_101_111"] => {
+            let a: u8 = Register::A.get(cpu_state);
+            Register::A.set(cpu_state, !a);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_half_carry(true);
+            flags.set_add_subtract(true);
+        },
+        "CPW": ["11_**0_111" (EDPrefix), src: rr_expanded(4..6)] => {
+            let a: u16 = Register::HL.get(cpu_state);
+            let src: u16 = src.get(cpu_state);
+            let result_checked = a.checked_sub(src);
+            let (result, borrow) = a.borrowing_sub(src, false);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((result & 0x8000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(super::calculate_half_carry_u16(a, (-(src as i16)) as u16));
+            flags.set_parity_overflow(result_checked.is_none());
+            flags.set_add_subtract(true);
+            flags.set_carry(borrow);
+        },
         "DAA": ["00_100_111"] => {
             let a_value: u8 = Register::A.get(cpu_state);
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
@@ -785,13 +905,35 @@ decode_instructions! {
         "DIV": [
             "11_***_100" (EDPrefix), src: src_dst(3..6),
             "11_111_100" (EDPrefix + IYOverride), src: imm8(),
-        ] => unimplemented,
+        ] => {
+            let lhs: i16 = Register::HL.get(cpu_state);
+            let rhs: i16 = src.get(cpu_state);
+
+            impl_div!(i8, cpu_state, lhs, rhs, Register::A, Register::L);
+        },
         "DIVU": [
             "11_***_101" (EDPrefix), src: src_dst(3..6),
             "11_111_101" (EDPrefix + IYOverride), src: imm8(),
-        ] => unimplemented,
-        "DIVUW": ["11_**1_011" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
-        "DIVW": ["11_**1_010" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
+        ] => {
+            let lhs: u16 = Register::HL.get(cpu_state);
+            let rhs: u16 = src.get(cpu_state);
+
+            impl_div!(u8, cpu_state, lhs, rhs, Register::A, Register::L);
+        },
+        "DIVUW": ["11_**1_011" (EDPrefix), src: rr_expanded(4..6)] => {
+            let lhs_high: u16 = Register::DE.get(cpu_state);
+            let lhs_low: u16 = Register::HL.get(cpu_state);
+            let rhs: u16 = src.get(cpu_state);
+
+            impl_div!(u16, cpu_state, (u32::from(lhs_high) << 16) | u32::from(lhs_low), u32::from(rhs), Register::HL, Register::DE);
+        },
+        "DIVW": ["11_**1_010" (EDPrefix), src: rr_expanded(4..6)] => {
+            let lhs_high: i16 = Register::DE.get(cpu_state);
+            let lhs_low: i16 = Register::HL.get(cpu_state);
+            let rhs: i16 = src.get(cpu_state);
+
+            impl_div!(i16, cpu_state, (i32::from(lhs_high) << 16) | i32::from(lhs_low), i32::from(rhs), Register::HL, Register::DE);
+        },
         "DJNZ": ["00_010_000", addr: indirect(Register::PC + imm8())] => {
             let value: u8 = Register::B.get(cpu_state);
             let result = value.wrapping_sub(1);
@@ -806,18 +948,40 @@ decode_instructions! {
             "11_111_011", mask: const(0x7f),
             "01_111_111" (EDPrefix), mask: imm8(),
         ] => unimplemented,
-        "EX AF, AF'": ["00_001_000"] => unimplemented,
-        "EX (SP)": ["11_100_011", dst: hl()] => unimplemented,
-        "EX H, L": ["11_101_111" (EDPrefix)] => unimplemented,
-        "EX HL": [
-            "11_101_011", src: Register::DE,
-            "11_101_011" (IXOverride), src: Register::IX,
-            "11_101_011" (IYOverride), src: Register::IY,
-        ] => unimplemented,
-        "EX A": ["00_***_111" (EDPrefix), src: src_dst(3..6)] => unimplemented,
-        "EXTS (byte form)": ["10_100_100" (EDPrefix)] => unimplemented,
-        "EXTS (word form)": ["10_101_100" (EDPrefix)] => unimplemented,
-        "EXX": ["11_011_001"] => unimplemented,
+        "EX AF, AF'": ["00_001_000"] => {
+            cpu_state.register_file.af_bank_index = (cpu_state.register_file.af_bank_index + 1) & 1;
+        },
+        "EX (byte)": [
+            "11_101_111" (EDPrefix), src: Register::H, dst: Register::L,
+            "00_***_111" (EDPrefix), src: src_dst(3..6), dst: Register::A
+        ] => {
+            let current_src: u8 = src.get(cpu_state);
+            let current_dst: u8 = dst.get(cpu_state);
+            src.set(cpu_state, current_dst);
+            dst.set(cpu_state, current_src);
+        },
+        "EX (word)": [
+            "11_100_011", src: indirect(Register::SP), dst: hl(),
+            "11_101_011", src: Register::DE, dst: Register::HL,
+            "11_101_011" (IXOverride), src: Register::IX, dst: Register::HL,
+            "11_101_011" (IYOverride), src: Register::IY, dst: Register::HL,
+        ] => {
+            let current_src: u16 = src.get(cpu_state);
+            let current_dst: u16 = dst.get(cpu_state);
+            src.set(cpu_state, current_dst);
+            dst.set(cpu_state, current_src);
+        },
+        "EXTS (byte form)": ["10_100_100" (EDPrefix)] => {
+            let a: i8 = Register::A.get(cpu_state);
+            Register::HL.set(cpu_state, a as i16);
+        },
+        "EXTS (word form)": ["10_101_100" (EDPrefix)] => {
+            let hl: i16 = Register::HL.get(cpu_state);
+            Register::DE.set(cpu_state, if hl < 0 { 0xffff_u16 } else { 0_u16 });
+        },
+        "EXX": ["11_011_001"] => {
+            cpu_state.register_file.x_bank_index = (cpu_state.register_file.x_bank_index + 1) & 1;
+        },
         "HALT": ["01_110_110"] => {
             // TODO: handle this properly, this isn't even remotely correct
             std::process::exit(0);
@@ -857,17 +1021,87 @@ decode_instructions! {
             let value: u16 = dst.get(cpu_state);
             dst.set(cpu_state, value.wrapping_add(1));
         },
-        "IND": ["10_101_010" (EDPrefix)] => unimplemented,
-        "INDW": ["10_001_010" (EDPrefix)] => unimplemented,
-        "INDR": ["10_111_010" (EDPrefix)] => unimplemented,
-        "INDRW": ["10_011_010" (EDPrefix)] => unimplemented,
-        "INI": ["10_100_010" (EDPrefix)] => unimplemented,
-        "INIW": ["10_000_010" (EDPrefix)] => unimplemented,
-        "INIR": ["10_110_010" (EDPrefix)] => unimplemented,
-        "INIRW": ["10_010_010" (EDPrefix)] => unimplemented,
-        "IN HL": ["10_110_111" (EDPrefix)] => unimplemented,
-        "JAF": ["00_101_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
-        "JAR": ["00_100_000" (IXOverride), addr: indirect(Register::PC + imm8())] => unimplemented,
+        "IND/INI": [
+            "10_101_010" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_111_010" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_100_010" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_110_010" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let zero_flag = loop {
+                let addr: u8 = Register::C.get(cpu_state);
+                let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+                let mut data = [0];
+
+                cpu_state.bus_accessor.read(crate::BusAddressSpace::IO, full_addr, &mut data);
+
+                let b_value: u8 = Register::B.get(cpu_state);
+                Register::B.set(cpu_state, b_value.wrapping_sub(1));
+
+                let hl_value: u16 = Register::HL.get(cpu_state);
+                let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(1) } else { hl_value.wrapping_sub(1) };
+
+                Memory { address: hl_value }.set(cpu_state, data[0]);
+                Register::HL.set(cpu_state, new_hl_value);
+
+                if b_value == 1 || repeat.is_zero() {
+                    break b_value == 1;
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_zero(zero_flag);
+            flags.set_add_subtract(true);
+        },
+        "INDW/INIW": [
+            "10_001_010" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_011_010" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_000_010" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_010_010" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let zero_flag = loop {
+                let addr: u8 = Register::C.get(cpu_state);
+                let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+                let mut data = [0; 2];
+
+                cpu_state.bus_accessor.read(crate::BusAddressSpace::IO, full_addr, &mut data);
+
+                let b_value: u8 = Register::B.get(cpu_state);
+                Register::B.set(cpu_state, b_value.wrapping_sub(1));
+
+                let hl_value: u16 = Register::HL.get(cpu_state);
+                let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(2) } else { hl_value.wrapping_sub(2) };
+
+                Memory { address: hl_value }.set(cpu_state, u16::from_le_bytes(data));
+                Register::HL.set(cpu_state, new_hl_value);
+
+                if b_value == 1 || repeat.is_zero() {
+                    break b_value == 1;
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_zero(zero_flag);
+            flags.set_add_subtract(true);
+        },
+        "IN[W]": ["10_110_111" (EDPrefix)] => {
+            let addr: u8 = Register::C.get(cpu_state);
+            let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+            let mut data = [0; 2];
+
+            cpu_state.bus_accessor.read(crate::BusAddressSpace::IO, full_addr, &mut data);
+
+            Register::HL.set(cpu_state, u16::from_le_bytes(data));
+        },
+        "JAF": ["00_101_000" (IXOverride), addr: indirect(Register::PC + imm8())] => {
+            if cpu_state.register_file.af_bank_index == 1 {
+                Register::PC.set(cpu_state, addr.address);
+            }
+        },
+        "JAR": ["00_100_000" (IXOverride), addr: indirect(Register::PC + imm8())] => {
+            if cpu_state.register_file.x_bank_index == 1 {
+                Register::PC.set(cpu_state, addr.address);
+            }
+        },
         "JP": [
             // JP
             "11_***_010" (IXOverride), cc: cc(3..6), dst: Register::HL,
@@ -966,7 +1200,10 @@ decode_instructions! {
             "01_000_111" (EDPrefix), src: Register::A, dst: Register::I,
             // LD R, A
             "01_001_111" (EDPrefix), src: Register::A, dst: Register::R,
-        ] => unimplemented,
+        ] => {
+            let value: u8 = src.get(cpu_state);
+            dst.set(cpu_state, value);
+        },
         "LDA": [
             // DA is a duplicate of LDW
             // X, RA, SR, BX
@@ -980,10 +1217,40 @@ decode_instructions! {
             "10_000_111" (EDPrefix), src: Register::USP, dst: hl(),
             "10_001_111" (EDPrefix), src: hl(), dst: Register::USP,
         ] => unimplemented,
-        "LDD": ["10_101_000" (EDPrefix)] => unimplemented,
-        "LDDR": ["10_111_000" (EDPrefix)] => unimplemented,
-        "LDI": ["10_100_000" (EDPrefix)] => unimplemented,
-        "LDIR": ["10_110_000" (EDPrefix)] => unimplemented,
+        "LDD/LDI": [
+            "10_101_000" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_111_000" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_100_000" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_110_000" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let flag = loop {
+                let de_value = Register::DE.get(cpu_state);
+                let hl_value = Register::HL.get(cpu_state);
+
+                let byte: u8 = Memory { address: hl_value }.get(cpu_state);
+                Memory { address: de_value }.set(cpu_state, byte);
+
+                if subtract.is_non_zero() {
+                    Register::DE.set(cpu_state, de_value.wrapping_sub(1));
+                    Register::HL.set(cpu_state, de_value.wrapping_sub(1));
+                } else {
+                    Register::DE.set(cpu_state, de_value.wrapping_add(1));
+                    Register::HL.set(cpu_state, de_value.wrapping_add(1));
+                }
+
+                let bc_value: u16 = Register::BC.get(cpu_state);
+                Register::BC.set(cpu_state, bc_value.wrapping_sub(1));
+
+                if bc_value == 1 || repeat.is_zero() {
+                    break bc_value == 1;
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(flag);
+            flags.set_add_subtract(false);
+        },
         "LDUD": [
             "10_000_110" (EDPrefix), src: hl_indirect_sx(), dst: Register::A,
             "10_001_110" (EDPrefix), src: Register::A, dst: hl_indirect_sx(),
@@ -995,17 +1262,87 @@ decode_instructions! {
         "MULT": [
             "11_***_000" (EDPrefix), src: src_dst(3..6),
             "11_111_000" (EDPrefix + IYOverride), src: imm8(),
-        ] => unimplemented,
+        ] => {
+            let a: i8 = Register::A.get(cpu_state);
+            let src: i8 = src.get(cpu_state);
+
+            let result = i16::from(a) * i16::from(src);
+            Register::HL.set(cpu_state, result);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(result < 0);
+            flags.set_zero(result == 0);
+            flags.set_parity_overflow(false);
+            flags.set_carry(result < -128 || result > 127);
+        },
         "MULTU": [
             "11_***_001" (EDPrefix), src: src_dst(3..6),
             "11_111_001" (EDPrefix + IYOverride), src: imm8(),
-        ] => unimplemented,
-        "MULTUW": ["11_**0_011" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
-        "MULTW": ["11_**0_010" (EDPrefix), src: rr_expanded(4..6)] => unimplemented,
-        "NEG": [
-            "01_000_100" (EDPrefix), register: Register::A,
-            "01_001_100" (EDPrefix), register: Register::HL,
-        ] => unimplemented,
+        ] => {
+            let a: u8 = Register::A.get(cpu_state);
+            let src: u8 = src.get(cpu_state);
+
+            let result = u16::from(a) * u16::from(src);
+            Register::HL.set(cpu_state, result);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(false);
+            flags.set_zero(result == 0);
+            flags.set_parity_overflow(false);
+            flags.set_carry(result > 0xff);
+        },
+        "MULTUW": ["11_**0_011" (EDPrefix), src: rr_expanded(4..6)] => {
+            let hl: u16 = Register::HL.get(cpu_state);
+            let src: u16 = src.get(cpu_state);
+
+            let result = u32::from(hl) * u32::from(src);
+            Register::DE.set(cpu_state, (result >> 16) as u16);
+            Register::HL.set(cpu_state, (result & 0xffff) as u16);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(false);
+            flags.set_zero(result == 0);
+            flags.set_parity_overflow(false);
+            flags.set_carry(result > 0xffff);
+        },
+        "MULTW": ["11_**0_010" (EDPrefix), src: rr_expanded(4..6)] => {
+            let hl: i16 = Register::HL.get(cpu_state);
+            let src: i16 = src.get(cpu_state);
+
+            let result = i32::from(hl) * i32::from(src);
+            Register::DE.set(cpu_state, (result >> 16) as i16);
+            Register::HL.set(cpu_state, (result & 0xffff) as i16);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(result < 0);
+            flags.set_zero(result == 0);
+            flags.set_parity_overflow(false);
+            flags.set_carry(result < -32768 || result > 32767);
+        },
+        "NEG A": ["01_000_100" (EDPrefix)] => {
+            let value: i8 = Register::A.get(cpu_state);
+            Register::A.set(cpu_state, if value == -128 { -128 } else { -value });
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(value < 0);
+            flags.set_zero(value == 0);
+            flags.set_half_carry(super::calculate_half_carry_u8(0, value as u8));
+            flags.set_parity_overflow(value != -128);
+            flags.set_add_subtract(true);
+            flags.set_carry(value != 0);
+        },
+        "NEG HL": ["01_001_100" (EDPrefix)] => {
+            let value: i16 = Register::HL.get(cpu_state);
+            Register::HL.set(cpu_state, if value == -32768 { -32768 } else { -value });
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign(value < 0);
+            flags.set_zero(value == 0);
+            flags.set_half_carry(super::calculate_half_carry_u16(0, value as u16));
+            flags.set_parity_overflow(value != -32768);
+            flags.set_add_subtract(true);
+            flags.set_carry(value != 0);
+        },
         "NOP": ["00_000_000"] => {},
         "OR": ["10_110_***", src: src_dst(0..3)] => {
             let a: u8 = Register::A.get(cpu_state);
@@ -1022,10 +1359,6 @@ decode_instructions! {
 
             Register::A.set(cpu_state, result);
         },
-        "OTDR": ["10_111_011" (EDPrefix)] => unimplemented,
-        "OTDRW": ["10_011_011" (EDPrefix)] => unimplemented,
-        "OTIR": ["10_110_011" (EDPrefix)] => unimplemented,
-        "OTIRW": ["10_010_011" (EDPrefix)] => unimplemented,
         "OUT": [
             "01_***_001" (EDPrefix), src: r(3..6) | ix_iy_components(3..6) | extended_indirect_modes(3..6), dst: Register::C, addr_middle_byte: Register::B,
             "11_010_011", src: Register::A, dst: imm8(), addr_middle_byte: Register::A,
@@ -1036,11 +1369,72 @@ decode_instructions! {
 
             cpu_state.bus_accessor.write(crate::BusAddressSpace::IO, full_addr, &[value]);
         },
-        "OUTD": ["10_101_011" (EDPrefix)] => unimplemented,
-        "OUTDW": ["10_001_011" (EDPrefix)] => unimplemented,
-        "OUTI": ["10_100_011" (EDPrefix)] => unimplemented,
-        "OUTIW": ["10_000_011" (EDPrefix)] => unimplemented,
-        "OUT HL": ["10_111_111" (EDPrefix)] => unimplemented,
+        "OUTD/OUTI": [
+            "10_101_011" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_111_011" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_100_011" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_110_011" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let zero_flag = loop {
+                let addr: u8 = Register::C.get(cpu_state);
+                let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+
+                let b_value: u8 = Register::B.get(cpu_state);
+                Register::B.set(cpu_state, b_value.wrapping_sub(1));
+
+                let hl_value: u16 = Register::HL.get(cpu_state);
+                let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(1) } else { hl_value.wrapping_sub(1) };
+                let to_write: u8 = Memory { address: hl_value }.get(cpu_state);
+
+                cpu_state.bus_accessor.write(crate::BusAddressSpace::IO, full_addr, &[to_write]);
+
+                Register::HL.set(cpu_state, new_hl_value);
+
+                if b_value == 1 || repeat.is_zero() {
+                    break b_value == 1;
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_zero(zero_flag);
+            flags.set_add_subtract(true);
+        },
+        "OUTDW/OUTIW": [
+            "10_001_011" (EDPrefix), repeat: const(0), subtract: const(1),
+            "10_011_011" (EDPrefix), repeat: const(1), subtract: const(1),
+            "10_000_011" (EDPrefix), repeat: const(0), subtract: const(0),
+            "10_010_011" (EDPrefix), repeat: const(1), subtract: const(0),
+        ] => {
+            let zero_flag = loop {
+                let addr: u8 = Register::C.get(cpu_state);
+                let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+
+                let b_value: u8 = Register::B.get(cpu_state);
+                Register::B.set(cpu_state, b_value.wrapping_sub(1));
+
+                let hl_value: u16 = Register::HL.get(cpu_state);
+                let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(2) } else { hl_value.wrapping_sub(2) };
+                let to_write: u16 = Memory { address: hl_value }.get(cpu_state);
+
+                cpu_state.bus_accessor.write(crate::BusAddressSpace::IO, full_addr, &to_write.to_le_bytes());
+                Register::HL.set(cpu_state, new_hl_value);
+
+                if b_value == 1 || repeat.is_zero() {
+                    break b_value == 1;
+                }
+            };
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_zero(zero_flag);
+            flags.set_add_subtract(true);
+        },
+        "OUT[W]": ["10_111_111" (EDPrefix)] => {
+            let addr: u8 = Register::C.get(cpu_state);
+            let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+            let value: u16 = Register::HL.get(cpu_state);
+
+            cpu_state.bus_accessor.write(crate::BusAddressSpace::IO, full_addr, &value.to_le_bytes());
+        },
         "PCACHE": ["01_100_101" (EDPrefix)] => unimplemented,
         "POP": ["11_**0_001", dst: rr_stack_ops(4..6) | rr_ix_expansion(4..6)] => {
             let value = super::pop(cpu_state);
@@ -1055,7 +1449,11 @@ decode_instructions! {
             let value = src.get(cpu_state);
             super::push(cpu_state, value);
         },
-        "RES": ["10_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
+        "RES": ["10_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
+            let b: u8 = b.get(cpu_state);
+            let dst_value: u8 = dst.get(cpu_state);
+            dst.set(cpu_state, dst_value & !(1 << b));
+        },
         "RET": [
             "11_***_000", cc: cc(3..6),
             "11_001_001", cc: ConditionCode::Always,
@@ -1110,7 +1508,24 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 0x80 != 0);
         },
-        "RLD": ["01_101_111" (EDPrefix)] => unimplemented,
+        "RLD": ["01_101_111" (EDPrefix), dst: indirect(Register::HL)] => {
+            let a_value: u8 = Register::A.get(cpu_state);
+            let dst_value: u8 = dst.get(cpu_state);
+
+            let new_a = (a_value & 0xf0) | (dst_value >> 4);
+            let new_dst = (dst_value << 4) | (a_value & 0x0f);
+
+            Register::A.set(cpu_state, new_a);
+            dst.set(cpu_state, new_dst);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((new_a & 0b1000_0000) != 0);
+            flags.set_zero(new_a == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(new_a)));
+            flags.set_add_subtract(false);
+        },
         "RR": [
             "00_011_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3), set_flags: const(1),
             "00_011_111", dst: Register::A, set_flags: const(0),
@@ -1153,8 +1568,30 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 1 != 0);
         },
-        "RRD": ["01_100_111" (EDPrefix)] => unimplemented,
-        "RST": ["11_***_111", addr: t_encoding(3..6)] => unimplemented,
+        "RRD": ["01_100_111" (EDPrefix), dst: indirect(Register::HL)] => {
+            let a_value: u8 = Register::A.get(cpu_state);
+            let dst_value: u8 = dst.get(cpu_state);
+
+            let new_a = (a_value & 0xf0) | (dst_value & 0x0f);
+            let new_dst = (dst_value >> 4) | (a_value << 4);
+
+            Register::A.set(cpu_state, new_a);
+            dst.set(cpu_state, new_dst);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((new_a & 0b1000_0000) != 0);
+            flags.set_zero(new_a == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(new_a)));
+            flags.set_add_subtract(false);
+        },
+        "RST": ["11_***_111", addr: t_encoding(3..6)] => {
+            let addr: u16 = addr.get(cpu_state);
+            let value = Register::PC.get(cpu_state);
+            super::push(cpu_state, value);
+            Register::PC.set(cpu_state, addr);
+        },
         "SUB/SBC (byte form)": [
             // SBC
             // R, RX, IR, DA, X, SX, RA, SR, BX
@@ -1179,13 +1616,80 @@ decode_instructions! {
             impl_sub!(u16, cpu_state, dst, src, use_carry.is_non_zero());
         },
         "SC": ["01_110_001" (EDPrefix), nn: imm16()] => unimplemented,
-        "SCF": ["0_110_111"] => unimplemented,
-        "SET": ["11_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
-        "SLA": ["00_100_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
-        "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
-        "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
-        "TSET": ["00_110_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => unimplemented,
-        "TSTI": ["01_110_000" (EDPrefix)] => unimplemented,
+        "SCF": ["0_110_111"] => {
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_half_carry(false);
+            flags.set_add_subtract(false);
+            flags.set_carry(true);
+        },
+        "SET": ["11_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
+            let b: u8 = b.get(cpu_state);
+            let dst_value: u8 = dst.get(cpu_state);
+            dst.set(cpu_state, dst_value | (1 << b));
+        },
+        "SLA": ["00_100_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let result = dst_value << 1;
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 0x80 != 0);
+
+            dst.set(cpu_state, result);
+        },
+        "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let result = (dst_value >> 1) | (dst_value & 0x80);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 1 != 0);
+
+            dst.set(cpu_state, result);
+        },
+        "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let result = dst_value >> 1;
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((result & 0b1000_0000) != 0);
+            flags.set_zero(result == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(result)));
+            flags.set_add_subtract(false);
+            flags.set_carry(dst_value & 1 != 0);
+
+            dst.set(cpu_state, result);
+        },
+        "TSET": ["00_110_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
+            let dst_value: u8 = dst.get(cpu_state);
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+
+            flags.set_sign((dst_value & 0b1000_0000) != 0);
+            dst.set(cpu_state, 0xff_u8);
+        },
+        "TSTI": ["01_110_000" (EDPrefix)] => {
+            let addr: u8 = Register::C.get(cpu_state);
+            let full_addr = super::calculate_io_address(cpu_state, addr, Register::B);
+            let mut data = [0];
+
+            cpu_state.bus_accessor.read(crate::BusAddressSpace::IO, full_addr, &mut data);
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
+            flags.set_sign((data[0] & 0b1000_0000) != 0);
+            flags.set_zero(data[0] == 0);
+            flags.set_half_carry(false);
+            flags.set_parity_overflow(super::calculate_parity(u16::from(data[0])));
+            flags.set_add_subtract(false);
+        },
         "XOR": [
             // R, RX, IR, DA, X, SX, RA, SR, BX
             "10_101_***", src: src_dst(0..3),

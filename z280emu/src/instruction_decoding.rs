@@ -1273,7 +1273,7 @@ decode_instructions! {
             flags.set_sign(result < 0);
             flags.set_zero(result == 0);
             flags.set_parity_overflow(false);
-            flags.set_carry(result < -128 || result > 127);
+            flags.set_carry(!(-128..=127).contains(&result));
         },
         "MULTU": [
             "11_***_001" (EDPrefix), src: src_dst(3..6),
@@ -1317,7 +1317,7 @@ decode_instructions! {
             flags.set_sign(result < 0);
             flags.set_zero(result == 0);
             flags.set_parity_overflow(false);
-            flags.set_carry(result < -32768 || result > 32767);
+            flags.set_carry(!(-32768..=32767).contains(&result));
         },
         "NEG A": ["01_000_100" (EDPrefix)] => {
             let value: i8 = Register::A.get(cpu_state);

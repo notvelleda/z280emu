@@ -346,6 +346,7 @@ struct State {
     instruction_definitions: Vec<InstructionDefinition>,
     invalid_instruction_handler: Option<TokenStream>,
     unimplemented_instruction_handler: Option<TokenStream>,
+    instruction_return_type: Option<TokenStream>,
 }
 
 impl State {
@@ -375,6 +376,7 @@ impl State {
                         "instructions" => self.parse_instructions_group(token_stream),
                         "invalid_instruction_handler" => self.invalid_instruction_handler = Some(token_stream),
                         "unimplemented_instruction_handler" => self.unimplemented_instruction_handler = Some(token_stream),
+                        "return_type" => self.instruction_return_type = Some(token_stream),
                         _ => panic!("unknown group name \"{identifier}\""),
                     };
                 }
@@ -390,7 +392,7 @@ impl State {
                         _ => panic!("unknown constant name \"{identifier}\""),
                     };
                 }
-                _ => panic!("expected brace-delimited group or literal"),
+                _ => panic!("expected brace-delimited group, literal, or identifier"),
             }
 
             if token_iterator.peek().is_some() {
@@ -1119,7 +1121,7 @@ impl State {
                                     cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut bytes);
                                     cpu_state.register_file.pc += #bytes_to_read;
 
-                                    #list_name[#int_type::from_le_bytes(bytes[#constant_immediates_size..].try_into().unwrap()) as usize](cpu_state, &bytes[..#constant_immediates_size]);
+                                    return #list_name[#int_type::from_le_bytes(bytes[#constant_immediates_size..].try_into().unwrap()) as usize](cpu_state, &bytes[..#constant_immediates_size]);
                                 }
                             }),
                         }
@@ -1133,7 +1135,7 @@ impl State {
                                     cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut opcode_bytes);
                                     cpu_state.register_file.pc += #instruction_word_size;
 
-                                    #list_name[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
+                                    return #list_name[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
                                 }
                             }),
                         }
@@ -1268,12 +1270,13 @@ impl State {
 
         let list_length = 1_usize << (self.instruction_word_size * 8);
         let root_list_name = proc_macro2::Ident::new("list_0", Span::call_site());
+        let return_type = self.instruction_return_type.clone().unwrap_or_else(|| quote! { () });
 
         // TODO: handle immediates before opcode for the root instruction table
 
         quote! {
-            type InstructionList<T> = std::rc::Rc<[Box<dyn Fn(&mut crate::CPUState<T>)>; #list_length]>;
-            type InstructionListWithImmediates<T> = std::rc::Rc<[std::boxed::Box<dyn Fn(&mut crate::CPUState<T>, &[u8])>; #list_length]>;
+            type InstructionList<T> = std::rc::Rc<[Box<dyn Fn(&mut crate::CPUState<T>) -> #return_type>; #list_length]>;
+            type InstructionListWithImmediates<T> = std::rc::Rc<[std::boxed::Box<dyn Fn(&mut crate::CPUState<T>, &[u8]) -> #return_type>; #list_length]>;
 
             pub struct InstructionDecoder<T>
             where T: crate::BusAccessor + 'static
@@ -1284,13 +1287,13 @@ impl State {
             impl<T> InstructionDecoder<T>
             where T: crate::BusAccessor + 'static
             {
-                pub fn decode_instruction(&self, cpu_state: &mut crate::CPUState<T>) {
+                pub fn decode_instruction(&self, cpu_state: &mut crate::CPUState<T>) -> #return_type {
                     let mut opcode_bytes = [0; #instruction_word_size];
 
                     cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut opcode_bytes);
                     cpu_state.register_file.pc += #instruction_word_size;
 
-                    self.root_list[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
+                    return self.root_list[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
                 }
             }
 

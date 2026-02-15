@@ -63,10 +63,8 @@ pub struct RegisterFile {
     pub iy: u16,
     /// program counter
     pub pc: u16,
-    /// USP and SSP stack pointer registers
+    /// SSP and USP stack pointer registers
     pub stack_pointers: [u16; 2],
-    /// which stack pointer is currently in use
-    pub stack_pointer_index: usize,
 }
 
 impl RegisterFile {
@@ -88,16 +86,6 @@ impl RegisterFile {
     /// returns a mutable reference to the set of other byte/word registers currently in use
     pub const fn current_x_bank_mut(&mut self) -> &mut ExtendedBank {
         &mut self.x_bank[self.x_bank_index]
-    }
-
-    /// returns a reference to the stack pointer currently in use
-    pub const fn current_stack_pointer(&self) -> &u16 {
-        &self.stack_pointers[self.stack_pointer_index]
-    }
-
-    /// returns a mutable reference to the stack pointer currently in use
-    pub const fn current_stack_pointer_mut(&mut self) -> &mut u16 {
-        &mut self.stack_pointers[self.stack_pointer_index]
     }
 }
 
@@ -306,7 +294,7 @@ pub struct MasterStatus {
     pub _zero: u8,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum UserSystemBit {
     #[default]
     System,
@@ -328,6 +316,13 @@ impl UserSystemBit {
             Self::User => 1,
         }
     }
+
+    pub const fn stack_pointer_index(&self) -> usize {
+        match self {
+            Self::System => 0,
+            Self::User => 1,
+        }
+    }
 }
 
 #[bitfield(u16)]
@@ -339,8 +334,8 @@ pub struct InterruptStatus {
     #[bits(1, default = 0)]
     _zero: u8,
     /// the Interrupt Mode (IM) field
-    #[bits(2, default = 0)]
-    pub interrupt_mode: u8,
+    #[bits(2, default = InterruptMode::Mode0)]
+    pub interrupt_mode: InterruptMode,
     #[bits(2, default = 0)]
     _zero: u8,
     /// the Interrupt Vector Enable (I) bit for the NMI vector line
@@ -355,6 +350,35 @@ pub struct InterruptStatus {
     /// the Interrupt Vector Enable (I) bit for the C vector line
     #[bits(default = false)]
     pub c_vector_enable: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InterruptMode {
+    Mode0,
+    Mode1,
+    Mode2,
+    Mode3,
+}
+
+impl InterruptMode {
+    pub const fn from_bits(bits: u8) -> Self {
+        match bits {
+            0 => Self::Mode0,
+            1 => Self::Mode1,
+            2 => Self::Mode2,
+            3 => Self::Mode3,
+            _ => panic!("invalid input to InterruptMode::from_bits()"),
+        }
+    }
+
+    pub const fn into_bits(self) -> u8 {
+        match self {
+            Self::Mode0 => 0,
+            Self::Mode1 => 1,
+            Self::Mode2 => 2,
+            Self::Mode3 => 3,
+        }
+    }
 }
 
 #[bitfield(u8)]

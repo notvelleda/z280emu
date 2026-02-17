@@ -37,9 +37,11 @@ macro_rules! impl_add {
     ($type:tt, $cpu_state:expr, $dst:expr, $src:expr, $respect_carry_bit:expr, $set_additional_flags:expr) => {
         let dst_value: $type = $dst.get($cpu_state)?;
         let src_value: $type = $src.get($cpu_state)?;
-        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
-
         let (result, carry) = dst_value.carrying_add(src_value, $respect_carry_bit && flags.carry());
+
+        $dst.set($cpu_state, result)?;
+
+        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
 
         if $set_additional_flags {
             let result_checked = if $respect_carry_bit {
@@ -56,8 +58,6 @@ macro_rules! impl_add {
         set_half_carry!($type, flags, dst_value, src_value);
         flags.set_add_subtract(false);
         flags.set_carry(carry);
-
-        $dst.set($cpu_state, result)?;
     };
 }
 
@@ -65,8 +65,6 @@ macro_rules! impl_sub {
     ($type:tt, $cpu_state:expr, $dst:expr, $src:expr, $respect_carry_bit:expr) => {
         let dst_value: $type = $dst.get($cpu_state)?;
         let src_value: $type = $src.get($cpu_state)?;
-        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
-
         let result_checked = if $respect_carry_bit {
             dst_value.checked_sub(src_value).and_then(|result| result.checked_sub(if flags.carry() { 1 } else { 0 }))
         } else {
@@ -74,22 +72,22 @@ macro_rules! impl_sub {
         };
         let (result, carry) = dst_value.borrowing_sub(src_value, $respect_carry_bit && flags.carry());
 
+        $dst.set($cpu_state, result)?;
+
+        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
         set_sign_bit!($type, flags, result);
         flags.set_zero(result == 0);
         set_half_carry!($type, flags, dst_value, negate src_value);
         flags.set_parity_overflow(result_checked.is_none());
         flags.set_add_subtract(true);
         flags.set_carry(carry);
-
-        $dst.set($cpu_state, result)?;
     };
 }
 
 macro_rules! impl_div {
     ($type: tt, $cpu_state:expr, $lhs:expr, $rhs:expr, $result:expr, $remainder:expr) => {
-        let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
-
         if $rhs == 0 {
+            let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign(false);
             flags.set_zero(true);
             flags.set_parity_overflow(true);
@@ -101,15 +99,17 @@ macro_rules! impl_div {
 
         match result {
             Ok(result) => {
+                $result.set($cpu_state, result)?;
+                $remainder.set($cpu_state, ($lhs % $rhs) as $type)?;
+
+                let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
                 #[allow(unused_comparisons)] // this just makes things easier
                 flags.set_sign(result < 0);
                 flags.set_zero(result == 0);
                 flags.set_parity_overflow(false);
-
-                $result.set($cpu_state, result)?;
-                $remainder.set($cpu_state, ($lhs % $rhs) as $type)?;
             }
             Err(_) => {
+                let flags = &mut $cpu_state.register_file.current_af_bank_mut().f;
                 flags.set_sign(false);
                 flags.set_zero(false);
                 flags.set_parity_overflow(true);
@@ -120,7 +120,6 @@ macro_rules! impl_div {
     };
 }
 
-// TODO: make sure all instructions won't modify state if an invalid memory address is accessed (except for block move instructions to an extent)
 decode_instructions! {
     instruction_word_size: 1,
     trace_instructions: true,
@@ -342,11 +341,12 @@ decode_instructions! {
             let dst_value: u16 = dst.get(cpu_state)?;
             let src: u8 = src.get(cpu_state)?;
             let src = src as i8 as i16 as u16;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
-
             let result_checked = dst_value.checked_add(src);
             let (result, carry) = dst_value.carrying_add(src, false);
 
+            dst.set(cpu_state, result)?;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0x8000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(calculate_half_carry_u16(dst_value, src));
@@ -354,7 +354,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(carry);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "AND": [
@@ -367,6 +366,8 @@ decode_instructions! {
             let src: u8 = src.get(cpu_state)?;
             let result = a & src;
 
+            Register::A.set(cpu_state, result)?;
+
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
@@ -375,7 +376,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(false);
 
-            Register::A.set(cpu_state, result)?;
             Ok(())
         },
         "BIT": ["01_***_***" (CBPrefix), b: imm_unsigned(3..6), dst: r(0..3) | hl_indirection(0..3)] => {
@@ -528,14 +528,14 @@ decode_instructions! {
             let value: u8 = dst.get(cpu_state)?;
             let result = value.checked_sub(1);
 
+            dst.set(cpu_state, result.unwrap_or_default())?;
+
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result.unwrap_or_default() & 0b1000_0000) != 0);
             flags.set_zero(result.unwrap_or_default() == 0);
             flags.set_half_carry(calculate_half_carry_u8(value, -1_i8 as u8));
             flags.set_parity_overflow(result.is_none());
             flags.set_add_subtract(true);
-
-            dst.set(cpu_state, result.unwrap_or_default())?;
 
             Ok(())
         },
@@ -703,6 +703,8 @@ decode_instructions! {
             let value: u8 = dst.get(cpu_state)?;
             let result = value.checked_add(1);
 
+            dst.set(cpu_state, result.unwrap_or_default())?;
+
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result.unwrap_or_default() & 0b1000_0000) != 0);
             flags.set_zero(result.unwrap_or_default() == 0);
@@ -710,7 +712,6 @@ decode_instructions! {
             flags.set_parity_overflow(result.is_none());
             flags.set_add_subtract(false);
 
-            dst.set(cpu_state, result.unwrap_or_default())?;
             Ok(())
         },
         "INC (word form)": ["00_**0_011", dst: rr_expanded(4..6)] => {
@@ -737,8 +738,6 @@ decode_instructions! {
                 cpu_state.mmu.read_io(full_addr, &mut data);
 
                 let b_value: u8 = Register::B.get(cpu_state)?;
-                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
-
                 let hl_value: u16 = Register::HL.get(cpu_state)?;
                 let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(1) } else { hl_value.wrapping_sub(1) };
 
@@ -748,6 +747,7 @@ decode_instructions! {
                 }
                 .set(cpu_state, data[0])?;
 
+                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
                 Register::HL.set(cpu_state, new_hl_value)?;
 
                 if b_value == 1 || repeat.is_zero() {
@@ -779,8 +779,6 @@ decode_instructions! {
                 cpu_state.mmu.read_io(full_addr, &mut data);
 
                 let b_value: u8 = Register::B.get(cpu_state)?;
-                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
-
                 let hl_value: u16 = Register::HL.get(cpu_state)?;
                 let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(2) } else { hl_value.wrapping_sub(2) };
 
@@ -790,6 +788,7 @@ decode_instructions! {
                 }
                 .set(cpu_state, u16::from_le_bytes(data))?;
 
+                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
                 Register::HL.set(cpu_state, new_hl_value)?;
 
                 if b_value == 1 || repeat.is_zero() {
@@ -960,7 +959,6 @@ decode_instructions! {
             "00_***_010" (EDPrefix), src: lda_extended(3..6), dst: hl(),
         ] => {
             dst.set(cpu_state, src.address)?;
-
             Ok(())
         },
         "LDCTL": [
@@ -1181,6 +1179,8 @@ decode_instructions! {
             let src: u8 = src.get(cpu_state)?;
             let result = a | src;
 
+            Register::A.set(cpu_state, result)?;
+
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
@@ -1189,7 +1189,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(false);
 
-            Register::A.set(cpu_state, result)?;
             Ok(())
         },
         "OUT": [
@@ -1222,8 +1221,6 @@ decode_instructions! {
                 let full_addr = calculate_io_address(cpu_state, addr, Register::B)?;
 
                 let b_value: u8 = Register::B.get(cpu_state)?;
-                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
-
                 let hl_value: u16 = Register::HL.get(cpu_state)?;
                 let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(1) } else { hl_value.wrapping_sub(1) };
                 let to_write: u8 =
@@ -1235,6 +1232,7 @@ decode_instructions! {
 
                 cpu_state.mmu.write_io(full_addr, &[to_write]);
 
+                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
                 Register::HL.set(cpu_state, new_hl_value)?;
 
                 if b_value == 1 || repeat.is_zero() {
@@ -1263,8 +1261,6 @@ decode_instructions! {
                 let full_addr = calculate_io_address(cpu_state, addr, Register::B)?;
 
                 let b_value: u8 = Register::B.get(cpu_state)?;
-                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
-
                 let hl_value: u16 = Register::HL.get(cpu_state)?;
                 let new_hl_value = if subtract.is_non_zero() { hl_value.wrapping_add(2) } else { hl_value.wrapping_sub(2) };
                 let to_write: u16 =
@@ -1275,6 +1271,8 @@ decode_instructions! {
                     .get(cpu_state)?;
 
                 cpu_state.mmu.write_io(full_addr, &to_write.to_le_bytes());
+
+                Register::B.set(cpu_state, b_value.wrapping_sub(1))?;
                 Register::HL.set(cpu_state, new_hl_value)?;
 
                 if b_value == 1 || repeat.is_zero() {
@@ -1372,9 +1370,11 @@ decode_instructions! {
             "00_010_111", dst: Register::A, set_flags: const(0),
         ] => {
             let dst_value: u8 = dst.get(cpu_state)?;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
-
             let result = (dst_value << 1) | if flags.carry() { 1 } else { 0 };
+
+            dst.set(cpu_state, result)?;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
             if set_flags.is_non_zero() {
                 flags.set_sign((result & 0b1000_0000) != 0);
@@ -1386,7 +1386,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 0x80 != 0);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "RLC": [
@@ -1437,9 +1436,11 @@ decode_instructions! {
             "00_011_111", dst: Register::A, set_flags: const(0),
         ] => {
             let dst_value: u8 = dst.get(cpu_state)?;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
-
             let result = (dst_value >> 1) | if flags.carry() { 0x80 } else { 0 };
+
+            dst.set(cpu_state, result)?;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
             if set_flags.is_non_zero() {
                 flags.set_sign((result & 0b1000_0000) != 0);
@@ -1451,7 +1452,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 1 != 0);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "RRC": [
@@ -1551,8 +1551,10 @@ decode_instructions! {
         "SLA": ["00_100_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
             let dst_value: u8 = dst.get(cpu_state)?;
             let result = dst_value << 1;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
+            dst.set(cpu_state, result)?;
+
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(false);
@@ -1560,7 +1562,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 0x80 != 0);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
@@ -1568,6 +1569,8 @@ decode_instructions! {
             let result = (dst_value >> 1) | (dst_value & 0x80);
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
+            dst.set(cpu_state, result)?;
+
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(false);
@@ -1575,7 +1578,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 1 != 0);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
@@ -1583,6 +1585,8 @@ decode_instructions! {
             let result = dst_value >> 1;
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
+            dst.set(cpu_state, result)?;
+
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(false);
@@ -1590,15 +1594,13 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(dst_value & 1 != 0);
 
-            dst.set(cpu_state, result)?;
             Ok(())
         },
         "TSET": ["00_110_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
             let dst_value: u8 = dst.get(cpu_state)?;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
-            flags.set_sign((dst_value & 0b1000_0000) != 0);
             dst.set(cpu_state, 0xff_u8)?;
+            cpu_state.register_file.current_af_bank_mut().f.set_sign((dst_value & 0b1000_0000) != 0);
 
             Ok(())
         },
@@ -1632,6 +1634,8 @@ decode_instructions! {
             let src: u8 = src.get(cpu_state)?;
             let result = a ^ src;
 
+            Register::A.set(cpu_state, result)?;
+
             let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
@@ -1640,7 +1644,6 @@ decode_instructions! {
             flags.set_add_subtract(false);
             flags.set_carry(false);
 
-            Register::A.set(cpu_state, result)?;
             Ok(())
         },
         "other EPU instructions": [

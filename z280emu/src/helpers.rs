@@ -1,8 +1,12 @@
-use crate::BusAccessor;
+use crate::{BusAccessor, mmu::AccessType};
 
 pub trait RegisterOrMemoryAccessor<R> {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> R;
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: R);
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<R, Trap>;
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: R) -> Result<(), Trap>;
+
+    fn indirect_access_type(&self) -> AccessType {
+        AccessType::Data
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -33,30 +37,30 @@ pub enum Register {
 }
 
 impl RegisterOrMemoryAccessor<u8> for Register {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u8 {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<u8, Trap> {
         match self {
-            Self::A => cpu_state.register_file.current_af_bank().a,
-            Self::F => cpu_state.register_file.current_af_bank().f.into_bits(),
-            Self::B => cpu_state.register_file.current_x_bank().b,
-            Self::C => cpu_state.register_file.current_x_bank().c,
-            Self::D => cpu_state.register_file.current_x_bank().d,
-            Self::E => cpu_state.register_file.current_x_bank().e,
-            Self::H => (cpu_state.register_file.current_x_bank().hl >> 8) as u8,
-            Self::L => (cpu_state.register_file.current_x_bank().hl & 0xff) as u8,
-            Self::I => cpu_state.register_file.i,
-            Self::R => cpu_state.register_file.r,
-            Self::IXH => (cpu_state.register_file.ix >> 8) as u8,
-            Self::IXL => (cpu_state.register_file.ix & 0xff) as u8,
-            Self::IYH => (cpu_state.register_file.iy >> 8) as u8,
-            Self::IYL => (cpu_state.register_file.iy & 0xff) as u8,
+            Self::A => Ok(cpu_state.register_file.current_af_bank().a),
+            Self::F => Ok(cpu_state.register_file.current_af_bank().f.into_bits()),
+            Self::B => Ok(cpu_state.register_file.current_x_bank().b),
+            Self::C => Ok(cpu_state.register_file.current_x_bank().c),
+            Self::D => Ok(cpu_state.register_file.current_x_bank().d),
+            Self::E => Ok(cpu_state.register_file.current_x_bank().e),
+            Self::H => Ok((cpu_state.register_file.current_x_bank().hl >> 8) as u8),
+            Self::L => Ok((cpu_state.register_file.current_x_bank().hl & 0xff) as u8),
+            Self::I => Ok(cpu_state.register_file.i),
+            Self::R => Ok(cpu_state.register_file.r),
+            Self::IXH => Ok((cpu_state.register_file.ix >> 8) as u8),
+            Self::IXL => Ok((cpu_state.register_file.ix & 0xff) as u8),
+            Self::IYH => Ok((cpu_state.register_file.iy >> 8) as u8),
+            Self::IYL => Ok((cpu_state.register_file.iy & 0xff) as u8),
             _ => {
-                let value: u16 = self.get(cpu_state);
-                value as u8
+                let value: u16 = self.get(cpu_state)?;
+                Ok(value as u8)
             }
         }
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u8) {
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u8) -> Result<(), Trap> {
         match self {
             Self::A => cpu_state.register_file.current_af_bank_mut().a = value,
             Self::F => cpu_state.register_file.current_af_bank_mut().f.set_bits(value),
@@ -90,40 +94,49 @@ impl RegisterOrMemoryAccessor<u8> for Register {
                 let iy = &mut cpu_state.register_file.iy;
                 *iy = (*iy & 0xff00) | value as u16;
             }
-            _ => self.set(cpu_state, value as u16),
+            _ => self.set(cpu_state, value as u16)?,
+        }
+
+        Ok(())
+    }
+
+    fn indirect_access_type(&self) -> AccessType {
+        match self {
+            Self::PC => AccessType::Program,
+            _ => AccessType::Data,
         }
     }
 }
 
 impl RegisterOrMemoryAccessor<u16> for Register {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u16 {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<u16, Trap> {
         match self {
             Self::AF => {
                 let partial_file = cpu_state.register_file.current_af_bank();
-                ((partial_file.a as u16) << 8) | (partial_file.f.into_bits() as u16)
+                Ok(((partial_file.a as u16) << 8) | (partial_file.f.into_bits() as u16))
             }
             Self::BC => {
                 let partial_file = cpu_state.register_file.current_x_bank();
-                ((partial_file.b as u16) << 8) | (partial_file.c as u16)
+                Ok(((partial_file.b as u16) << 8) | (partial_file.c as u16))
             }
             Self::DE => {
                 let partial_file = cpu_state.register_file.current_x_bank();
-                ((partial_file.d as u16) << 8) | (partial_file.e as u16)
+                Ok(((partial_file.d as u16) << 8) | (partial_file.e as u16))
             }
-            Self::HL => cpu_state.register_file.current_x_bank().hl,
-            Self::IX => cpu_state.register_file.ix,
-            Self::IY => cpu_state.register_file.iy,
-            Self::PC => cpu_state.register_file.pc,
-            Self::SP => cpu_state.register_file.stack_pointers[cpu_state.system_status_registers.master_status.user_system_bit().stack_pointer_index()],
-            Self::USP => cpu_state.register_file.stack_pointers[1],
+            Self::HL => Ok(cpu_state.register_file.current_x_bank().hl),
+            Self::IX => Ok(cpu_state.register_file.ix),
+            Self::IY => Ok(cpu_state.register_file.iy),
+            Self::PC => Ok(cpu_state.register_file.pc),
+            Self::SP => Ok(cpu_state.register_file.stack_pointers[cpu_state.system_status_registers.master_status.user_system_bit().stack_pointer_index()]),
+            Self::USP => Ok(cpu_state.register_file.stack_pointers[1]),
             _ => {
-                let value: u8 = self.get(cpu_state);
-                value as u16
+                let value: u8 = self.get(cpu_state)?;
+                Ok(value as u16)
             }
         }
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) {
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) -> Result<(), Trap> {
         match self {
             Self::AF => {
                 let partial_file = cpu_state.register_file.current_af_bank_mut();
@@ -147,99 +160,121 @@ impl RegisterOrMemoryAccessor<u16> for Register {
             Self::PC => cpu_state.register_file.pc = value,
             Self::SP => cpu_state.register_file.stack_pointers[cpu_state.system_status_registers.master_status.user_system_bit().stack_pointer_index()] = value,
             Self::USP => cpu_state.register_file.stack_pointers[1] = value,
-            _ => self.set(cpu_state, value as u8),
+            _ => self.set(cpu_state, value as u8)?,
+        }
+
+        Ok(())
+    }
+
+    fn indirect_access_type(&self) -> AccessType {
+        match self {
+            Self::PC => AccessType::Program,
+            _ => AccessType::Data,
         }
     }
 }
 
 impl RegisterOrMemoryAccessor<i8> for Register {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i8 {
-        let value: u8 = self.get(cpu_state);
-        value as i8
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<i8, Trap> {
+        let value: u8 = self.get(cpu_state)?;
+        Ok(value as i8)
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i8) {
-        self.set(cpu_state, value as u8);
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i8) -> Result<(), Trap> {
+        self.set(cpu_state, value as u8)
+    }
+
+    fn indirect_access_type(&self) -> AccessType {
+        match self {
+            Self::PC => AccessType::Program,
+            _ => AccessType::Data,
+        }
     }
 }
 
 impl RegisterOrMemoryAccessor<i16> for Register {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i16 {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<i16, Trap> {
         match self {
             Self::BC | Self::DE | Self::HL | Self::IX | Self::IY | Self::PC | Self::SP => {
-                let value: u16 = self.get(cpu_state);
-                value as i16
+                let value: u16 = self.get(cpu_state)?;
+                Ok(value as i16)
             }
             _ => {
-                let value: u8 = self.get(cpu_state);
-                i16::from(value as i8)
+                let value: u8 = self.get(cpu_state)?;
+                Ok(i16::from(value as i8))
             }
         }
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i16) {
-        self.set(cpu_state, value as u16);
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i16) -> Result<(), Trap> {
+        self.set(cpu_state, value as u16)
+    }
+
+    fn indirect_access_type(&self) -> AccessType {
+        match self {
+            Self::PC => AccessType::Program,
+            _ => AccessType::Data,
+        }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Memory {
     pub address: u16,
+    pub access_type: AccessType,
 }
 
 impl RegisterOrMemoryAccessor<u8> for Memory {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u8 {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<u8, Trap> {
         let mut result = [0];
-
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
-
-        result[0]
+        cpu_state
+            .mmu
+            .read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), self.access_type, self.address, &mut result)?;
+        Ok(result[0])
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u8) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &[value]);
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u8) -> Result<(), Trap> {
+        Ok(cpu_state
+            .mmu
+            .write_memory(cpu_state.system_status_registers.master_status.user_system_bit(), self.access_type, self.address, &[value])?)
     }
 }
 
 impl RegisterOrMemoryAccessor<u16> for Memory {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> u16 {
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<u16, Trap> {
         let mut result = [0; 2];
-
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
-
-        u16::from_le_bytes(result)
+        cpu_state
+            .mmu
+            .read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), self.access_type, self.address, &mut result)?;
+        Ok(u16::from_le_bytes(result))
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &value.to_le_bytes());
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: u16) -> Result<(), Trap> {
+        Ok(cpu_state
+            .mmu
+            .write_memory(cpu_state.system_status_registers.master_status.user_system_bit(), self.access_type, self.address, &value.to_le_bytes())?)
     }
 }
 
 impl RegisterOrMemoryAccessor<i8> for Memory {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i8 {
-        let mut result = [0];
-
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
-
-        result[0] as i8
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<i8, Trap> {
+        let value: u8 = self.get(cpu_state)?;
+        Ok(value as i8)
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i8) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &[value as u8]);
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i8) -> Result<(), Trap> {
+        self.set(cpu_state, value as u8)
     }
 }
 
 impl RegisterOrMemoryAccessor<i16> for Memory {
-    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> i16 {
-        let mut result = [0; 2];
-
-        cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, u32::from(self.address), &mut result);
-
-        i16::from_le_bytes(result)
+    fn get<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<i16, Trap> {
+        let value: u16 = self.get(cpu_state)?;
+        Ok(value as i16)
     }
 
-    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i16) {
-        cpu_state.bus_accessor.write(crate::BusAddressSpace::Memory, u32::from(self.address), &value.to_le_bytes());
+    fn set<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>, value: i16) -> Result<(), Trap> {
+        self.set(cpu_state, value as u16)
     }
 }
 
@@ -272,73 +307,74 @@ impl Immediate {
 }
 
 impl RegisterOrMemoryAccessor<u8> for Immediate {
-    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> u8 {
+    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> Result<u8, Trap> {
         match self {
-            Self::Byte(value) => *value,
-            Self::Word(value) => *value as u8,
-            Self::UnknownSigned(value) => *value as u8,
-            Self::UnknownUnsigned(value) => *value as u8,
+            Self::Byte(value) => Ok(*value),
+            Self::Word(value) => Ok(*value as u8),
+            Self::UnknownSigned(value) => Ok(*value as u8),
+            Self::UnknownUnsigned(value) => Ok(*value as u8),
         }
     }
 
-    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: u8) {
+    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: u8) -> Result<(), Trap> {
         unimplemented!()
     }
 }
 
 impl RegisterOrMemoryAccessor<u16> for Immediate {
-    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> u16 {
+    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> Result<u16, Trap> {
         match self {
-            Self::Byte(value) => u16::from(*value),
-            Self::Word(value) => *value,
-            Self::UnknownSigned(value) => *value as u16,
-            Self::UnknownUnsigned(value) => *value as u16,
+            Self::Byte(value) => Ok(u16::from(*value)),
+            Self::Word(value) => Ok(*value),
+            Self::UnknownSigned(value) => Ok(*value as u16),
+            Self::UnknownUnsigned(value) => Ok(*value as u16),
         }
     }
 
-    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: u16) {
+    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: u16) -> Result<(), Trap> {
         unimplemented!()
     }
 }
 
 impl RegisterOrMemoryAccessor<i8> for Immediate {
-    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> i8 {
+    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> Result<i8, Trap> {
         match self {
-            Self::Byte(value) => *value as i8,
-            Self::Word(value) => (*value as i16) as i8,
-            Self::UnknownSigned(value) => *value as i8,
-            Self::UnknownUnsigned(value) => *value as i8,
+            Self::Byte(value) => Ok(*value as i8),
+            Self::Word(value) => Ok((*value as i16) as i8),
+            Self::UnknownSigned(value) => Ok(*value as i8),
+            Self::UnknownUnsigned(value) => Ok(*value as i8),
         }
     }
 
-    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: i8) {
+    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: i8) -> Result<(), Trap> {
         unimplemented!()
     }
 }
 
 impl RegisterOrMemoryAccessor<i16> for Immediate {
-    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> i16 {
+    fn get<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>) -> Result<i16, Trap> {
         match self {
-            Self::Byte(value) => i16::from(*value as i8),
-            Self::Word(value) => *value as i16,
-            Self::UnknownSigned(value) => *value as i16,
-            Self::UnknownUnsigned(value) => *value as i16,
+            Self::Byte(value) => Ok(i16::from(*value as i8)),
+            Self::Word(value) => Ok(*value as i16),
+            Self::UnknownSigned(value) => Ok(*value as i16),
+            Self::UnknownUnsigned(value) => Ok(*value as i16),
         }
     }
 
-    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: i16) {
+    fn set<T: BusAccessor>(&self, _cpu_state: &mut super::CPUState<T>, _value: i16) -> Result<(), Trap> {
         unimplemented!()
     }
 }
 
-pub fn indirect<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, lhs: impl RegisterOrMemoryAccessor<u16>, rhs: impl RegisterOrMemoryAccessor<i16>) -> Memory {
-    Memory {
-        address: lhs.get(cpu_state).wrapping_add_signed(rhs.get(cpu_state)),
-    }
+pub fn indirect<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, lhs: impl RegisterOrMemoryAccessor<u16>, rhs: impl RegisterOrMemoryAccessor<i16>) -> Result<Memory, Trap> {
+    Ok(Memory {
+        address: lhs.get(cpu_state)?.wrapping_add_signed(rhs.get(cpu_state)?),
+        access_type: lhs.indirect_access_type(),
+    })
 }
 
-pub fn direct<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, lhs: impl RegisterOrMemoryAccessor<u16>, rhs: impl RegisterOrMemoryAccessor<i16>) -> Immediate {
-    Immediate::Word(lhs.get(cpu_state).wrapping_add_signed(rhs.get(cpu_state)))
+pub fn direct<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, lhs: impl RegisterOrMemoryAccessor<u16>, rhs: impl RegisterOrMemoryAccessor<i16>) -> Result<Immediate, Trap> {
+    Ok(Immediate::Word(lhs.get(cpu_state)?.wrapping_add_signed(rhs.get(cpu_state)?)))
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -405,25 +441,33 @@ pub fn calculate_half_carry_u16(lhs: u16, rhs: u16) -> bool {
 }
 
 // TODO: system stack overflow warning trap
-pub fn push<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, value: u16) {
-    let sp: u16 = Register::SP.get(cpu_state);
+pub fn push<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, value: u16) -> Result<(), Trap> {
+    let sp: u16 = Register::SP.get(cpu_state)?;
     let sp = sp.wrapping_sub(2);
-    Register::SP.set(cpu_state, sp);
+    Register::SP.set(cpu_state, sp)?;
 
-    Memory { address: sp }.set(cpu_state, value);
+    Memory {
+        address: sp,
+        access_type: AccessType::Data,
+    }
+    .set(cpu_state, value)
 }
 
-pub fn pop<T: BusAccessor>(cpu_state: &mut super::CPUState<T>) -> u16 {
-    let sp: u16 = Register::SP.get(cpu_state);
+pub fn pop<T: BusAccessor>(cpu_state: &mut super::CPUState<T>) -> Result<u16, Trap> {
+    let sp: u16 = Register::SP.get(cpu_state)?;
     let new_sp = sp.wrapping_add(2);
-    Register::SP.set(cpu_state, new_sp);
+    Register::SP.set(cpu_state, new_sp)?;
 
-    Memory { address: sp }.get(cpu_state)
+    Memory {
+        address: sp,
+        access_type: AccessType::Data,
+    }
+    .get(cpu_state)
 }
 
-pub fn calculate_io_address<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, low_byte: u8, middle_byte: Register) -> u32 {
-    let middle_byte: u8 = middle_byte.get(cpu_state);
-    (low_byte as u32) | ((middle_byte as u32) << 8) | ((cpu_state.system_status_registers.io_page as u32) << 16)
+pub fn calculate_io_address<T: BusAccessor>(cpu_state: &mut super::CPUState<T>, low_byte: u8, middle_byte: Register) -> Result<u32, Trap> {
+    let middle_byte: u8 = middle_byte.get(cpu_state)?;
+    Ok((low_byte as u32) | ((middle_byte as u32) << 8) | ((cpu_state.system_status_registers.io_page as u32) << 16))
 }
 
 pub fn privileged_instruction_check<T: BusAccessor>(cpu_state: &mut super::CPUState<T>) -> Result<(), Trap> {
@@ -459,7 +503,7 @@ impl Trap {
     }
 
     /// called when handling a trap to push extra trap-specific information to the stack
-    pub fn push_extra_data<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) {
+    pub fn push_extra_data<T: BusAccessor>(&self, cpu_state: &mut super::CPUState<T>) -> Result<(), Trap> {
         match self {
             Self::ExtendedInstruction {
                 memory_operand_address,
@@ -467,13 +511,13 @@ impl Trap {
                 ..
             } => {
                 if let Some(address) = memory_operand_address {
-                    push(cpu_state, *address);
+                    push(cpu_state, *address)?;
                 }
 
-                push(cpu_state, *template_address);
+                push(cpu_state, *template_address)
             }
             Self::SystemCall(immediate) => push(cpu_state, *immediate),
-            _ => (),
+            _ => Ok(()),
         }
     }
 
@@ -499,7 +543,7 @@ pub fn system_stack_overflow_check<T: BusAccessor>(cpu_state: &mut super::CPUSta
         return Ok(());
     }
 
-    let sp_value: u16 = Register::SP.get(cpu_state);
+    let sp_value: u16 = Register::SP.get(cpu_state)?;
 
     match (sp_value & !15) == (cpu_state.system_status_registers.system_stack_limit & !15) {
         true => Err(Trap::SystemStackOverflowWarning),

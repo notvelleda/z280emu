@@ -1,8 +1,10 @@
 pub mod helpers;
 pub mod instruction_decoding;
+pub mod mmu;
 pub mod registers;
 
-use log::{info, warn};
+use crate::helpers::RegisterOrMemoryAccessor;
+use log::{error, info, warn};
 use std::io::{Read, Write};
 
 pub struct CPUState<T: BusAccessor + 'static> {
@@ -10,7 +12,7 @@ pub struct CPUState<T: BusAccessor + 'static> {
     pub control_registers: registers::ControlRegisters,
     pub system_status_registers: registers::SystemStatusRegisters,
     pub interrupt_shadow_register: u8,
-    pub bus_accessor: T,
+    pub mmu: mmu::MMU<T>,
     //pub instruction_decoder: instruction_decoding::InstructionDecoder<T>,
 }
 
@@ -21,7 +23,7 @@ impl<T: BusAccessor> CPUState<T> {
             control_registers: registers::ControlRegisters::default(),
             system_status_registers: registers::SystemStatusRegisters::default(),
             interrupt_shadow_register: 0,
-            bus_accessor,
+            mmu: mmu::MMU::new(bus_accessor),
             //instruction_decoder: instruction_decoding::InstructionDecoder::default(),
         }
     }
@@ -63,7 +65,7 @@ impl<T: BusAccessor> CPUState<T> {
         }
     }
 
-    pub fn handle_trap(&mut self, trap: helpers::Trap, old_pc_value: u16) {
+    pub fn handle_trap(&mut self, trap: helpers::Trap, old_pc_value: u16) -> Result<(), helpers::Trap> {
         if !trap.should_push_next_instruction_address() {
             self.system_status_registers.master_status.set_single_step_pending(false);
         }
@@ -75,27 +77,29 @@ impl<T: BusAccessor> CPUState<T> {
         self.system_status_registers.master_status.set_user_system_bit(registers::UserSystemBit::System);
 
         if trap.should_push_next_instruction_address() {
-            helpers::push(self, pc);
+            helpers::push(self, pc)?;
         } else {
-            helpers::push(self, old_pc_value);
+            helpers::push(self, old_pc_value)?;
         }
 
-        helpers::push(self, msr);
-        trap.push_extra_data(self);
+        helpers::push(self, msr)?;
+        trap.push_extra_data(self)?;
 
         let full_address = (u32::from(self.system_status_registers.interrupt_trap_vector_table_pointer & !15) << 8) + trap.vector_table_offset();
         let mut bytes = [0; 4];
 
-        self.bus_accessor.read(BusAddressSpace::Memory, full_address, &mut bytes);
+        self.mmu.external_bus.read(BusAddressSpace::Memory, full_address, &mut bytes);
 
         self.system_status_registers.master_status = registers::MasterStatus::from_bits(u16::from_le_bytes(bytes[0..2].try_into().unwrap()));
         self.register_file.pc = u16::from_le_bytes(bytes[2..4].try_into().unwrap());
+
+        Ok(())
     }
 }
 
 pub trait BusAccessor {
     /// reads data from memory. the upper 8 bits of the address are unused
-    fn read(&self, address_space: BusAddressSpace, address: u32, data: &mut [u8]);
+    fn read(&mut self, address_space: BusAddressSpace, address: u32, data: &mut [u8]);
 
     /// writes data to memory. the upper 8 bits of the address are unused
     fn write(&mut self, address_space: BusAddressSpace, address: u32, data: &[u8]);
@@ -112,7 +116,7 @@ struct SimpleBusAccessor {
 }
 
 impl BusAccessor for SimpleBusAccessor {
-    fn read(&self, address_space: BusAddressSpace, address: u32, data: &mut [u8]) {
+    fn read(&mut self, address_space: BusAddressSpace, address: u32, data: &mut [u8]) {
         match address_space {
             BusAddressSpace::Memory => data.copy_from_slice(&self.memory[address as usize..address as usize + data.len()]),
             BusAddressSpace::IO => match address & 0xff {
@@ -153,13 +157,16 @@ fn main() {
 
     let program = std::fs::read(std::env::args().nth(1).expect("expected program to execute as an argument")).unwrap();
 
-    cpu_state.bus_accessor.memory[..program.len()].clone_from_slice(&program);
+    cpu_state.mmu.external_bus.memory[..program.len()].clone_from_slice(&program);
     cpu_state.register_file.stack_pointers[registers::UserSystemBit::System.stack_pointer_index()] = 0xffff;
 
     loop {
         if cpu_state.system_status_registers.master_status.single_step_pending() {
             cpu_state.system_status_registers.master_status.set_single_step_pending(false);
-            cpu_state.handle_trap(helpers::Trap::SingleStep, cpu_state.register_file.pc);
+
+            if cpu_state.handle_trap(helpers::Trap::SingleStep, cpu_state.register_file.pc).is_err() {
+                break;
+            }
 
             continue;
         }
@@ -169,14 +176,28 @@ fn main() {
         msr.set_single_step_pending(msr.single_step());
 
         if let Err(trap) = decoder.decode_instruction(&mut cpu_state) {
-            cpu_state.handle_trap(trap, old_pc_value);
+            if cpu_state.handle_trap(trap, old_pc_value).is_err() {
+                break;
+            }
 
             // TODO: is this the correct behavior?
             if trap != helpers::Trap::SystemStackOverflowWarning
                 && let Err(new_trap) = helpers::system_stack_overflow_check(&mut cpu_state, true)
+                && cpu_state.handle_trap(new_trap, cpu_state.register_file.pc).is_err()
             {
-                cpu_state.handle_trap(new_trap, cpu_state.register_file.pc);
+                break;
             }
         }
     }
+
+    let pc = cpu_state.register_file.pc;
+    let msr = cpu_state.system_status_registers.master_status.into_bits();
+
+    helpers::Register::HL.set(&mut cpu_state, pc).unwrap();
+    helpers::Register::DE.set(&mut cpu_state, msr).unwrap();
+
+    cpu_state.system_status_registers.master_status.set_irq_enable(0);
+
+    error!("fatal condition encountered during interrupt processing!");
+    error!("PC: {pc:#x}, MSR: {msr:#x} ({:?})", cpu_state.system_status_registers.master_status);
 }

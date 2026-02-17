@@ -218,12 +218,12 @@ impl AddressingMethod {
             Self::Direct { lhs, rhs } => {
                 let lhs_tokens = lhs.build_tokens(immediates_index);
                 let rhs_tokens = rhs.as_ref().map(|rhs| rhs.build_tokens(immediates_index)).unwrap_or_else(|| quote! { Immediate::UnknownUnsigned(0) });
-                quote! { direct(cpu_state, #lhs_tokens, #rhs_tokens) }
+                quote! { direct(cpu_state, #lhs_tokens, #rhs_tokens)? }
             }
             Self::Indirect { lhs, rhs } => {
                 let lhs_tokens = lhs.build_tokens(immediates_index);
                 let rhs_tokens = rhs.as_ref().map(|rhs| rhs.build_tokens(immediates_index)).unwrap_or_else(|| quote! { Immediate::UnknownUnsigned(0) });
-                quote! { indirect(cpu_state, #lhs_tokens, #rhs_tokens) }
+                quote! { indirect(cpu_state, #lhs_tokens, #rhs_tokens)? }
             }
             Self::ConstantSigned(value) => quote! { Immediate::UnknownSigned(#value) },
             Self::ConstantUnsigned(value) => quote! { Immediate::UnknownUnsigned(#value) },
@@ -1118,7 +1118,7 @@ impl State {
                                 move |cpu_state| {
                                     let mut bytes = [0; #bytes_to_read];
 
-                                    cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut bytes);
+                                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut bytes)?;
                                     cpu_state.register_file.pc += #bytes_to_read;
 
                                     return #list_name[#int_type::from_le_bytes(bytes[#constant_immediates_size..].try_into().unwrap()) as usize](cpu_state, &bytes[..#constant_immediates_size]);
@@ -1132,7 +1132,7 @@ impl State {
                                 move |cpu_state| {
                                     let mut opcode_bytes = [0; #instruction_word_size];
 
-                                    cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut opcode_bytes);
+                                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut opcode_bytes)?;
                                     cpu_state.register_file.pc += #instruction_word_size;
 
                                     return #list_name[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
@@ -1199,7 +1199,7 @@ impl State {
                             quote! {
                                 let mut immediate_bytes = [0; #immediates_length];
 
-                                cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut immediate_bytes);
+                                cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut immediate_bytes)?;
                                 cpu_state.register_file.pc += #immediates_length;
                             }
                         };
@@ -1290,7 +1290,7 @@ impl State {
                 pub fn decode_instruction(&self, cpu_state: &mut crate::CPUState<T>) -> #return_type {
                     let mut opcode_bytes = [0; #instruction_word_size];
 
-                    cpu_state.bus_accessor.read(crate::BusAddressSpace::Memory, cpu_state.register_file.pc as u32, &mut opcode_bytes);
+                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut opcode_bytes)?;
                     cpu_state.register_file.pc += #instruction_word_size;
 
                     return self.root_list[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);

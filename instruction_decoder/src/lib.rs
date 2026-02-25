@@ -347,6 +347,7 @@ struct State {
     invalid_instruction_handler: Option<TokenStream>,
     unimplemented_instruction_handler: Option<TokenStream>,
     instruction_return_type: Option<TokenStream>,
+    memory_read_handler: Option<TokenStream>,
 }
 
 impl State {
@@ -377,6 +378,7 @@ impl State {
                         "invalid_instruction_handler" => self.invalid_instruction_handler = Some(token_stream),
                         "unimplemented_instruction_handler" => self.unimplemented_instruction_handler = Some(token_stream),
                         "return_type" => self.instruction_return_type = Some(token_stream),
+                        "memory_read_handler" => self.memory_read_handler = Some(token_stream),
                         _ => panic!("unknown group name \"{identifier}\""),
                     };
                 }
@@ -1107,6 +1109,7 @@ impl State {
                     );
 
                     let list_name = proc_macro2::Ident::new(&format!("list_{other_list_index}"), Span::call_site());
+                    let memory_read_handler = self.memory_read_handler.as_ref().unwrap();
 
                     let tokens = if next_immediates_before_opcode {
                         let constant_immediates_size = self.constant_immediates_size(&other_list.iter().filter_map(PrefixCombinationEntry::prefix).cloned().collect());
@@ -1117,9 +1120,7 @@ impl State {
                                 let #list_name = #list_name.clone();
                                 move |cpu_state| {
                                     let mut bytes = [0; #bytes_to_read];
-
-                                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut bytes)?;
-                                    cpu_state.register_file.pc += #bytes_to_read;
+                                    #memory_read_handler
 
                                     return #list_name[#int_type::from_le_bytes(bytes[#constant_immediates_size..].try_into().unwrap()) as usize](cpu_state, &bytes[..#constant_immediates_size]);
                                 }
@@ -1130,12 +1131,10 @@ impl State {
                             std::boxed::Box::new({
                                 let #list_name = #list_name.clone();
                                 move |cpu_state| {
-                                    let mut opcode_bytes = [0; #instruction_word_size];
+                                    let mut bytes = [0; #instruction_word_size];
+                                    #memory_read_handler
 
-                                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut opcode_bytes)?;
-                                    cpu_state.register_file.pc += #instruction_word_size;
-
-                                    return #list_name[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
+                                    return #list_name[#int_type::from_le_bytes(bytes) as usize](cpu_state);
                                 }
                             }),
                         }
@@ -1195,12 +1194,12 @@ impl State {
                             quote! {}
                         } else {
                             let immediates_length = Literal::usize_unsuffixed(immediates_length);
+                            let memory_read_handler = self.memory_read_handler.as_ref().unwrap();
 
                             quote! {
-                                let mut immediate_bytes = [0; #immediates_length];
-
-                                cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut immediate_bytes)?;
-                                cpu_state.register_file.pc += #immediates_length;
+                                let mut bytes = [0; #immediates_length];
+                                #memory_read_handler
+                                let immediate_bytes = bytes;
                             }
                         };
 
@@ -1271,6 +1270,7 @@ impl State {
         let list_length = 1_usize << (self.instruction_word_size * 8);
         let root_list_name = proc_macro2::Ident::new("list_0", Span::call_site());
         let return_type = self.instruction_return_type.clone().unwrap_or_else(|| quote! { () });
+        let memory_read_handler = self.memory_read_handler.as_ref().unwrap();
 
         // TODO: handle immediates before opcode for the root instruction table
 
@@ -1288,12 +1288,10 @@ impl State {
             where T: crate::BusAccessor + 'static
             {
                 pub fn decode_instruction(&self, cpu_state: &mut crate::CPUState<T>) -> #return_type {
-                    let mut opcode_bytes = [0; #instruction_word_size];
+                    let mut bytes = [0; #instruction_word_size];
+                    #memory_read_handler
 
-                    cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut opcode_bytes)?;
-                    cpu_state.register_file.pc += #instruction_word_size;
-
-                    return self.root_list[#int_type::from_le_bytes(opcode_bytes) as usize](cpu_state);
+                    return self.root_list[#int_type::from_le_bytes(bytes) as usize](cpu_state);
                 }
             }
 

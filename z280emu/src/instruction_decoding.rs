@@ -37,7 +37,8 @@ macro_rules! impl_add {
     ($type:tt, $cpu_state:expr, $dst:expr, $src:expr, $respect_carry_bit:expr, $set_additional_flags:expr) => {
         let dst_value: $type = $dst.get($cpu_state)?;
         let src_value: $type = $src.get($cpu_state)?;
-        let (result, carry) = dst_value.carrying_add(src_value, $respect_carry_bit && flags.carry());
+        let carry_flag_value = $cpu_state.register_file.current_af_bank_mut().f.carry();
+        let (result, carry) = dst_value.carrying_add(src_value, $respect_carry_bit && carry_flag_value);
 
         $dst.set($cpu_state, result)?;
 
@@ -45,7 +46,7 @@ macro_rules! impl_add {
 
         if $set_additional_flags {
             let result_checked = if $respect_carry_bit {
-                dst_value.checked_add(src_value).and_then(|result| result.checked_add(if flags.carry() { 1 } else { 0 }))
+                dst_value.checked_add(src_value).and_then(|result| result.checked_add(if carry_flag_value { 1 } else { 0 }))
             } else {
                 dst_value.checked_add(src_value)
             };
@@ -65,12 +66,13 @@ macro_rules! impl_sub {
     ($type:tt, $cpu_state:expr, $dst:expr, $src:expr, $respect_carry_bit:expr) => {
         let dst_value: $type = $dst.get($cpu_state)?;
         let src_value: $type = $src.get($cpu_state)?;
+        let carry_flag_value = $cpu_state.register_file.current_af_bank_mut().f.carry();
         let result_checked = if $respect_carry_bit {
-            dst_value.checked_sub(src_value).and_then(|result| result.checked_sub(if flags.carry() { 1 } else { 0 }))
+            dst_value.checked_sub(src_value).and_then(|result| result.checked_sub(if carry_flag_value { 1 } else { 0 }))
         } else {
             dst_value.checked_sub(src_value)
         };
-        let (result, carry) = dst_value.borrowing_sub(src_value, $respect_carry_bit && flags.carry());
+        let (result, carry) = dst_value.borrowing_sub(src_value, $respect_carry_bit && carry_flag_value);
 
         $dst.set($cpu_state, result)?;
 
@@ -1370,7 +1372,8 @@ decode_instructions! {
             "00_010_111", dst: Register::A, set_flags: const(0),
         ] => {
             let dst_value: u8 = dst.get(cpu_state)?;
-            let result = (dst_value << 1) | if flags.carry() { 1 } else { 0 };
+            let carry_flag_value = cpu_state.register_file.current_af_bank_mut().f.carry();
+            let result = (dst_value << 1) | if carry_flag_value { 1 } else { 0 };
 
             dst.set(cpu_state, result)?;
 
@@ -1436,7 +1439,8 @@ decode_instructions! {
             "00_011_111", dst: Register::A, set_flags: const(0),
         ] => {
             let dst_value: u8 = dst.get(cpu_state)?;
-            let result = (dst_value >> 1) | if flags.carry() { 0x80 } else { 0 };
+            let carry_flag_value = cpu_state.register_file.current_af_bank_mut().f.carry();
+            let result = (dst_value >> 1) | if carry_flag_value { 0x80 } else { 0 };
 
             dst.set(cpu_state, result)?;
 
@@ -1567,10 +1571,10 @@ decode_instructions! {
         "SRA": ["00_101_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
             let dst_value: u8 = dst.get(cpu_state)?;
             let result = (dst_value >> 1) | (dst_value & 0x80);
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
             dst.set(cpu_state, result)?;
 
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(false);
@@ -1583,10 +1587,10 @@ decode_instructions! {
         "SRL": ["00_111_***" (CBPrefix), dst: r(0..3) | hl_indirection(0..3)] => {
             let dst_value: u8 = dst.get(cpu_state)?;
             let result = dst_value >> 1;
-            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
 
             dst.set(cpu_state, result)?;
 
+            let flags = &mut cpu_state.register_file.current_af_bank_mut().f;
             flags.set_sign((result & 0b1000_0000) != 0);
             flags.set_zero(result == 0);
             flags.set_half_carry(false);
@@ -1696,5 +1700,9 @@ decode_instructions! {
     unimplemented_instruction_handler: {
         warn!("unimplemented instruction {instruction_as_string}");
         Ok(())
+    },
+    memory_read_handler: {
+        cpu_state.mmu.read_memory(cpu_state.system_status_registers.master_status.user_system_bit(), crate::mmu::AccessType::Program, cpu_state.register_file.pc, &mut bytes)?;
+        cpu_state.register_file.pc += bytes.len() as u16;
     },
 }
